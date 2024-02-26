@@ -1,0 +1,16 @@
+.env
+archive/
+dist/
+node_modules/
+credentials/
+
+# from Functions subfolder
+# Compiled JavaScript files
+functions/lib/**/*.js
+functions/lib/**/*.js.map
+
+# TypeScript v1 declaration files
+functions/typings/
+
+# Node.js dependency directory
+functions/node_modules/
