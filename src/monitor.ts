@@ -377,6 +377,18 @@ const fetchExistingContestsFromFirestore = async (): Promise<CombinedEvent[]> =>
   return snapshot.docs.map(doc => doc.data() as CombinedEvent)
 }
 
+function getTeamNameForSport(sport: number, name: string, mascot?: string): string {
+  // Rules for sports that should include the mascot in the team name
+  const sportsWithMascot = [0, 1, 4, 5] // MLB, NBA, NFL, NHL (JsonOdds IDs)
+
+  // If the sport requires mascot, append it to the team name
+  if (sportsWithMascot.includes(sport) && mascot) {
+    return standardizeTeamName(`${name} ${mascot}`)
+  } else {
+    return standardizeTeamName(name)
+  }
+}
+
 const processEventData = (
   jsonoddsData: JsonoddsResponse[],
   rundownData: RundownResponse,
@@ -405,8 +417,8 @@ const processEventData = (
         return false // Skip this event if teams data is not adequate
       }
 
-      const eventHomeTeam = standardizeTeamName(`${event.teams_normalized[1].name} ${event.teams_normalized[1].mascot}`)
-      const eventAwayTeam = standardizeTeamName(`${event.teams_normalized[0].name} ${event.teams_normalized[0].mascot}`)
+      const eventHomeTeam = getTeamNameForSport(jsonoddsEvent.Sport, event.teams_normalized[1].name, event.teams_normalized[1].mascot)
+      const eventAwayTeam = getTeamNameForSport(jsonoddsEvent.Sport, event.teams_normalized[0].name, event.teams_normalized[0].mascot)
       const eventDateTime = new Date(event.event_date)
       const eventMatchDateHour = new Date(
         eventDateTime.getUTCFullYear(),
@@ -574,9 +586,9 @@ const archiveOldData = async () => {
       batch.delete(contestsColRef.doc(docSnapshot.id))
     })
     await batch.commit()
-    console.log('Old data archived successfully');
+    console.log('Old data archived successfully')
   } catch (error) {
-    console.error('Error archiving old data:', error);
+    console.error('Error archiving old data:', error)
   }
 }
 
@@ -627,7 +639,7 @@ const monitor = async () => {
     }
 
     console.log('Total number of matched events across all sports:', allCombinedData.length)
-    console.log(allCombinedData)
+    // console.log(allCombinedData)
 
     await archiveOldData()
     await saveDataToFirestore(allCombinedData)
@@ -637,7 +649,7 @@ const monitor = async () => {
   }
 }
 
-// Scheduling the monitor function to run once every 4 hours
+// Scheduling the monitor function to run based on refresh rate in seconds
 schedule.scheduleJob(`*/${process.env.REFRESH_RATE} * * * *`, async () => {
   console.log('Running monitor function...')
   await monitor()
