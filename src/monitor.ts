@@ -224,8 +224,6 @@ interface CombinedEvent {
   status: string
 }
 
-const serviceAccount = require('../credentials/serviceAccountKey.json')
-
 admin.initializeApp({
   credential: admin.credential.cert(JSON.parse(process.env.SERVICE_ACCOUNT_KEY || '{}'))
 })
