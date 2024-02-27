@@ -640,7 +640,7 @@ const monitor = async () => {
 }
 
 // Scheduling the monitor function to run once every 4 hours
-schedule.scheduleJob('0 */4 * * *', async () => {
+schedule.scheduleJob(`*/${process.env.REFRESH_RATE} * * * *`, async () => {
   console.log('Running monitor function...')
   await monitor()
 })
