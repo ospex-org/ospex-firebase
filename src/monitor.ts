@@ -2,6 +2,7 @@ import * as schedule from 'node-schedule'
 import * as admin from 'firebase-admin'
 import * as dotenv from 'dotenv'
 import axios from 'axios'
+import { json } from 'express'
 
 dotenv.config()
 
@@ -224,15 +225,22 @@ interface CombinedEvent {
   status: string
 }
 
+interface TeamAlias {
+  league: number
+  aliases: string[]
+}
+
 admin.initializeApp({
   credential: admin.credential.cert(JSON.parse(process.env.SERVICE_ACCOUNT_KEY || '{}'))
 })
 
 const db = admin.firestore()
 
-const teamNameAliases = new Map<string, string[]>([
-  ["Miami Florida", ["Miami (FL)", "Miami Florida"]],
-  ["Miami Ohio", ["Miami (OH)", "Miami Ohio"]],
+const teamNameAliases = new Map<string, TeamAlias[]>([
+  ["Los Angeles Clippers", [{ league: 1 /* NBA */, aliases: ["LA Clippers", "Los Angeles Clippers"] }]],
+  ["Portland Trail Blazers", [{ league: 1 /* NBA */, aliases: ["Portland Trailblazers", "Portland Trail Blazers"] }]],
+  ["Miami Florida", [{ league: 2 /* NCB */, aliases: ["Miami (FL)", "Miami Florida"] }]],
+  ["Miami Ohio", [{ league: 2 /* NCB */, aliases: ["Miami (OH)", "Miami Ohio"] }]],
 ])
 
 const sportsConfig = {
@@ -351,13 +359,14 @@ function isSeasonActive(sport: keyof typeof sportsConfig): boolean {
     (today >= postseasonStart && today <= postseasonEnd)
 }
 
-const standardizeTeamName = (name: string): string => {
-  for (const [standardName, aliases] of teamNameAliases) {
-    if (aliases.includes(name)) {
-      return standardName;
+const standardizeTeamName = (name: string, league: number): string => {
+  for (const [standardName, leagueAliases] of teamNameAliases) {
+    const leagueAlias = leagueAliases.find(alias => alias.league === league)
+    if (leagueAlias && leagueAlias.aliases.includes(name)) {
+      return standardName
     }
   }
-  return name; // Return the original name if no alias is found
+  return name // Return the original name if no alias is found
 }
 
 const getDatesForNextNDays = (days: number): string[] => {
@@ -383,9 +392,9 @@ function getTeamNameForSport(sport: number, name: string, mascot?: string): stri
 
   // If the sport requires mascot, append it to the team name
   if (sportsWithMascot.includes(sport) && mascot) {
-    return standardizeTeamName(`${name} ${mascot}`)
+    return standardizeTeamName(`${name} ${mascot}`, sport)
   } else {
-    return standardizeTeamName(name)
+    return standardizeTeamName(name, sport)
   }
 }
 
@@ -396,8 +405,8 @@ const processEventData = (
   existingContests: CombinedEvent[]
 ): (CombinedEvent | undefined)[] => {
   return jsonoddsData.map((jsonoddsEvent: JsonoddsResponse) => {
-    const jsonoddsHomeTeam = standardizeTeamName(jsonoddsEvent.HomeTeam)
-    const jsonoddsAwayTeam = standardizeTeamName(jsonoddsEvent.AwayTeam)
+    const jsonoddsHomeTeam = standardizeTeamName(jsonoddsEvent.HomeTeam, jsonoddsEvent.Sport)
+    const jsonoddsAwayTeam = standardizeTeamName(jsonoddsEvent.AwayTeam, jsonoddsEvent.Sport)
     const jsonoddsMatchDateTime = new Date(jsonoddsEvent.MatchTime + 'Z') // Parse the JsonOdds match time as UTC
     const jsonoddsMatchDateHour = new Date(
       jsonoddsMatchDateTime.getUTCFullYear(),
@@ -442,8 +451,8 @@ const processEventData = (
     })
 
     const sportspageEvent = sportspageData.results.find((event: SportspageResult) => {
-      const eventHomeTeam = standardizeTeamName(event.teams.home.team)
-      const eventAwayTeam = standardizeTeamName(event.teams.away.team)
+      const eventHomeTeam = standardizeTeamName(event.teams.home.team, jsonoddsEvent.Sport)
+      const eventAwayTeam = standardizeTeamName(event.teams.away.team, jsonoddsEvent.Sport)
       const eventDateTime = new Date(event.schedule.date)
       const eventMatchDateHour = new Date(
         eventDateTime.getUTCFullYear(),
