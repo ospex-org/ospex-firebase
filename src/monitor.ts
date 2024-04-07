@@ -241,6 +241,7 @@ const teamNameAliases = new Map<string, TeamAlias[]>([
   ["Portland Trail Blazers", [{ league: 1 /* NBA */, aliases: ["Portland Trailblazers", "Portland Trail Blazers"] }]],
   ["Miami Florida", [{ league: 2 /* NCB */, aliases: ["Miami (FL)", "Miami Florida"] }]],
   ["Miami Ohio", [{ league: 2 /* NCB */, aliases: ["Miami (OH)", "Miami Ohio"] }]],
+  ["Connecticut", [{ league: 2 /* NCB */, aliases: ["UConn", "Connecticut"] }]],
 ])
 
 const sportsConfig = {

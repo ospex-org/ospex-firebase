@@ -111,6 +111,41 @@ export const listenForSpeculationCreation = functions.pubsub.schedule(
   }
 });
 
+export const checkPendingContestsAndSpeculations = functions.pubsub.schedule(
+  "every 1 minutes"
+).onRun(async (context) => {
+  const contestsRef = db.collection("contests");
+  const speculationsRef = db.collection("speculations");
+  const currentTime = admin.firestore.Timestamp.now();
+  const pendingThreshold = currentTime.toMillis() - 120000; // 2 minutes
+
+  // Check pending contests
+  const pendingContestsSnapshot = await contestsRef
+    .where("status", "==", "Pending")
+    .where("pendingTime", "<=",
+      admin.firestore.Timestamp.fromMillis(pendingThreshold))
+    .get();
+
+  pendingContestsSnapshot.forEach(async (doc) => {
+    await doc.ref.update({status: "Ready"});
+    console.log(
+      `Contest ${doc.id} status updated to "Ready" due to timeout.`);
+  });
+
+  // Check pending speculations
+  const pendingSpeculationsSnapshot = await speculationsRef
+    .where("status", "==", "Pending")
+    .where("pendingTime", "<=",
+      admin.firestore.Timestamp.fromMillis(pendingThreshold))
+    .get();
+
+  pendingSpeculationsSnapshot.forEach(async (doc) => {
+    await doc.ref.update({status: "Ready"});
+    console.log(
+      `Speculation ${doc.id} status updated to "Ready" due to timeout.`);
+  });
+});
+
 export const scheduledFirestoreCleanup =
   functions.pubsub.schedule("every 24 hours").onRun(async (context) => {
     const now = Timestamp.now();
