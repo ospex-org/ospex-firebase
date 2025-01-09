@@ -288,9 +288,9 @@ const sportsConfig = {
     preseasonStart: '2024-12-31', // TBD
     preseasonEnd: '2024-12-31', // TBD
     seasonStart: '2024-12-31', // TBD
-    seasonEnd: '2024-12-31', // TBD
-    postseasonStart: '2024-12-01', // TBD
-    postseasonEnd: '2025-01-31', // TBD
+    seasonEnd: '2025-01-31', // TBD
+    postseasonStart: '2024-12-31', // TBD
+    postseasonEnd: '2024-12-31', // TBD
     daysAheadPreseason: 21,
     daysAheadRegular: 8,
     daysAheadPostseason: 30,
@@ -372,12 +372,14 @@ const standardizeTeamName = (name: string, league: number): string => {
 
 const getDatesForNextNDays = (days: number): string[] => {
   const dates = []
+  console.log(`Fetching dates for next ${days} days`)
   for (let i = 0; i < days; i++) {
     const date = new Date()
     date.setHours(date.getHours() - new Date().getTimezoneOffset() / 60 - 5) // Adjusted for EST (UTC-5), may change later
     date.setDate(date.getDate() + i)
     const formattedDate = date.toISOString().split('T')[0] // Format the date as 'YYYY-MM-DD'
     dates.push(formattedDate)
+    console.log(`Added date: ${formattedDate}`)
   }
   return dates
 }
@@ -566,13 +568,14 @@ const fetchSportspageData = async (league: string, dates: string[]): Promise<Spo
 
 const fetchJsonoddsData = async (): Promise<JsonoddsResponse[] | undefined> => {
   try {
-    // console.log(`Fetching JsonOdds data`)
+    console.log('Fetching JsonOdds data')
     const response = await axios.get('https://jsonodds.com/api/odds?oddType=Game', {
       headers: {
         'x-api-key': process.env.JSONODDS_API_KEY
       }
     })
-    // console.log(`JsonOdds API response:`, response.data)
+    console.log('JsonOdds response count:', response.data.length)
+    console.log('NCAAF games:', response.data.filter((game: JsonoddsResponse) => game.Sport === 3).length)
     return response.data
   } catch (error) {
     console.error('Error fetching Jsonodds data:', error)
@@ -623,20 +626,27 @@ const monitor = async () => {
     if (!jsonoddsData) {
       throw new Error('JsonOdds API request failed');
     }
+    console.log('JsonOdds data count:', jsonoddsData.length)
 
     let allCombinedData: CombinedEvent[] = []
     const existingContests = await fetchExistingContestsFromFirestore()
+    console.log('Existing contests:', existingContests.length)
 
     for (const sport of Object.keys(sportsConfig)) {
+      console.log(`Processing sport: ${sport}`)
       if (isSeasonActive(sport as keyof typeof sportsConfig)) {
-        const { daysAhead } = getSeasonPhaseAndDaysAhead(sport as keyof typeof sportsConfig)
-
-        // Generate the list of dates for which to fetch data
+        console.log(`${sport} is active`)
+        const { phase, daysAhead } = getSeasonPhaseAndDaysAhead(sport as keyof typeof sportsConfig)
+        console.log(`Phase: ${phase}, Days ahead: ${daysAhead}`)
+        
         const dates = getDatesForNextNDays(daysAhead)
 
         // Fetch sports data for these dates
         const rundownData = await fetchRundownData(sportsConfig[sport as keyof typeof sportsConfig].rundownId, dates)
         const sportspageData = await fetchSportspageData(sport, dates)
+
+        console.log(`Rundown events: ${rundownData?.events.length || 0}`)
+        console.log(`Sportspage results: ${sportspageData?.results.length || 0}`)
 
         if (rundownData && rundownData.events.length > 0 && sportspageData && sportspageData.results.length > 0) {
           const jsonoddsFilteredData = jsonoddsData.filter(event => event.Sport === sportsConfig[sport as keyof typeof sportsConfig].jsonoddsId)
