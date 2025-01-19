@@ -290,10 +290,10 @@ const sportsConfig = {
     seasonStart: '2024-12-31', // TBD
     seasonEnd: '2024-12-31', // TBD
     postseasonStart: '2024-12-31', // TBD
-    postseasonEnd: '2024-12-31', // TBD
+    postseasonEnd: '2025-01-20', // TBD
     daysAheadPreseason: 21,
     daysAheadRegular: 8,
-    daysAheadPostseason: 30,
+    daysAheadPostseason: 3,
     jsonoddsId: 3,
     rundownId: 1
   },
