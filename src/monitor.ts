@@ -306,7 +306,7 @@ const sportsConfig = {
     postseasonEnd: '2025-02-10', // TBD
     daysAheadPreseason: 21,
     daysAheadRegular: 8,
-    daysAheadPostseason: 15,
+    daysAheadPostseason: 3,
     jsonoddsId: 4,
     rundownId: 2
   },
