@@ -274,12 +274,12 @@ const sportsConfig = {
   NCAAB: {
     preseasonStart: '2024-12-31', // TBD
     preseasonEnd: '2024-12-31', // TBD
-    seasonStart: '2023-11-06',
-    seasonEnd: '2024-03-17',
+    seasonStart: '2025-02-10',
+    seasonEnd: '2025-02-12',
     postseasonStart: '2024-03-18',
     postseasonEnd: '2024-04-08',
     daysAheadPreseason: 10,
-    daysAheadRegular: 3,
+    daysAheadRegular: 2,
     daysAheadPostseason: 7,
     jsonoddsId: 2,
     rundownId: 5
