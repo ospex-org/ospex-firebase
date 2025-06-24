@@ -248,12 +248,12 @@ const sportsConfig = {
   MLB: {
     preseasonStart: '2024-12-31', // TBD
     preseasonEnd: '2024-12-31', // TBD
-    seasonStart: '2024-04-01',
-    seasonEnd: '2024-10-31',
+    seasonStart: '2025-04-01',
+    seasonEnd: '2025-10-31',
     postseasonStart: '2024-11-01',
     postseasonEnd: '2024-12-15',
     daysAheadPreseason: 14,
-    daysAheadRegular: 7,
+    daysAheadRegular: 3,
     daysAheadPostseason: 14,
     jsonoddsId: 0,
     rundownId: 3
