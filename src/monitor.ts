@@ -219,8 +219,16 @@ interface CombinedEvent {
   HomeTeam: string
   MatchTime: admin.firestore.Timestamp
   OddType: string
-  PointSpreadAway: string
+  // Comprehensive odds data from JsonOdds
+  MoneyLineAway: string
+  MoneyLineHome: string
+  OverLine: string
   TotalNumber: string
+  UnderLine: string
+  PointSpreadAway: string
+  PointSpreadHome: string
+  PointSpreadAwayLine: string
+  PointSpreadHomeLine: string
   Created: boolean
   status: string
 }
@@ -493,8 +501,16 @@ const processEventData = (
         HomeTeam: jsonoddsEvent.HomeTeam,
         MatchTime: admin.firestore.Timestamp.fromDate(new Date(`${jsonoddsEvent.MatchTime}Z`)),
         OddType: jsonoddsEvent.Odds[0].OddType,
-        PointSpreadAway: jsonoddsEvent.Odds[0].PointSpreadAway,
+        // Store comprehensive odds data from JsonOdds for leaderboard validation and odds updates
+        MoneyLineAway: jsonoddsEvent.Odds[0].MoneyLineAway,
+        MoneyLineHome: jsonoddsEvent.Odds[0].MoneyLineHome,
+        OverLine: jsonoddsEvent.Odds[0].OverLine,
         TotalNumber: jsonoddsEvent.Odds[0].TotalNumber,
+        UnderLine: jsonoddsEvent.Odds[0].UnderLine,
+        PointSpreadAway: jsonoddsEvent.Odds[0].PointSpreadAway,
+        PointSpreadHome: jsonoddsEvent.Odds[0].PointSpreadHome,
+        PointSpreadAwayLine: jsonoddsEvent.Odds[0].PointSpreadAwayLine,
+        PointSpreadHomeLine: jsonoddsEvent.Odds[0].PointSpreadHomeLine,
         Created: isCreated,
         status: 'Ready'
       }
