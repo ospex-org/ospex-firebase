@@ -330,6 +330,19 @@ const sportsConfig = {
     daysAheadPostseason: 7,
     jsonoddsId: 5,
     rundownId: 6
+  },
+  WNBA: {
+    preseasonStart: '2024-12-31', // TBD
+    preseasonEnd: '2024-12-31', // TBD
+    seasonStart: '2025-05-16',
+    seasonEnd: '2025-09-11',
+    postseasonStart: '2025-09-12',
+    postseasonEnd: '2025-10-31',
+    daysAheadPreseason: 10,
+    daysAheadRegular: 3,
+    daysAheadPostseason: 7,
+    jsonoddsId: 8,
+    rundownId: 8
   }
 }
 
@@ -399,7 +412,7 @@ const fetchExistingContestsFromFirestore = async (): Promise<CombinedEvent[]> =>
 
 function getTeamNameForSport(sport: number, name: string, mascot?: string): string {
   // Rules for sports that should include the mascot in the team name
-  const sportsWithMascot = [0, 1, 4, 5] // MLB, NBA, NFL, NHL (JsonOdds IDs)
+  const sportsWithMascot = [0, 1, 4, 5, 8] // MLB, NBA, NFL, NHL, WNBA (JsonOdds IDs)
 
   // If the sport requires mascot, append it to the team name
   if (sportsWithMascot.includes(sport) && mascot) {
