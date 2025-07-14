@@ -261,7 +261,7 @@ const sportsConfig = {
     postseasonStart: '2024-11-01',
     postseasonEnd: '2024-12-15',
     daysAheadPreseason: 14,
-    daysAheadRegular: 3,
+    daysAheadRegular: 5,
     daysAheadPostseason: 14,
     jsonoddsId: 0,
     rundownId: 3
@@ -270,7 +270,7 @@ const sportsConfig = {
     preseasonStart: '2024-10-03', // TBD
     preseasonEnd: '2024-10-21', // TBD
     seasonStart: '2024-12-25',
-    seasonEnd: '2025-07-21',
+    seasonEnd: '2025-04-21',
     postseasonStart: '2025-01-01', // TBD
     postseasonEnd: '2025-01-01', // TBD
     daysAheadPreseason: 10,
@@ -334,10 +334,10 @@ const sportsConfig = {
   WNBA: {
     preseasonStart: '2024-12-31', // TBD
     preseasonEnd: '2024-12-31', // TBD
-    seasonStart: '2025-05-16',
-    seasonEnd: '2025-09-11',
-    postseasonStart: '2025-09-12',
-    postseasonEnd: '2025-10-31',
+    seasonStart: '2024-12-31',
+    seasonEnd: '2024-12-31',
+    postseasonStart: '2024-12-31',
+    postseasonEnd: '2024-12-31',
     daysAheadPreseason: 10,
     daysAheadRegular: 3,
     daysAheadPostseason: 7,
