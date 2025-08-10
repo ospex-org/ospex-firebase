@@ -251,6 +251,7 @@ admin.initializeApp({
 })
 
 const db = admin.firestore()
+db.settings({ ignoreUndefinedProperties: true })
 
 const teamNameAliases = new Map<string, TeamAlias[]>([
   ["Los Angeles Clippers", [{ league: 1 /* NBA */, aliases: ["LA Clippers", "Los Angeles Clippers"] }]],
