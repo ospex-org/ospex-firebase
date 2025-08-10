@@ -185,6 +185,8 @@ interface JsonoddsResponse {
   AwayTeam: string
   Sport: number
   MatchTime: string
+  HomePitcher?: string
+  AwayPitcher?: string
   HomeROT?: string
   AwayROT?: string
   League?: { Name: string }
@@ -229,6 +231,12 @@ interface CombinedEvent {
   PointSpreadHome: string
   PointSpreadAwayLine: string
   PointSpreadHomeLine: string
+  // Additional JsonOdds data
+  HomePitcher: string | undefined
+  AwayPitcher: string | undefined
+  HomeROT: string | undefined
+  AwayROT: string | undefined
+  LastUpdated: admin.firestore.Timestamp
   Created: boolean
   status: string
 }
@@ -306,13 +314,13 @@ const sportsConfig = {
     rundownId: 1
   },
   NFL: {
-    preseasonStart: '2024-12-31', // TBD
-    preseasonEnd: '2024-12-31', // TBD
+    preseasonStart: '2025-08-01',
+    preseasonEnd: '2025-08-23',
     seasonStart: '2024-12-31', // TBD
     seasonEnd: '2024-12-31', // TBD
     postseasonStart: '2024-12-31', // TBD
     postseasonEnd: '2025-02-10', // TBD
-    daysAheadPreseason: 21,
+    daysAheadPreseason: 3,
     daysAheadRegular: 8,
     daysAheadPostseason: 3,
     jsonoddsId: 4,
@@ -524,6 +532,11 @@ const processEventData = (
         PointSpreadHome: jsonoddsEvent.Odds[0].PointSpreadHome,
         PointSpreadAwayLine: jsonoddsEvent.Odds[0].PointSpreadAwayLine,
         PointSpreadHomeLine: jsonoddsEvent.Odds[0].PointSpreadHomeLine,
+        HomePitcher: jsonoddsEvent.HomePitcher || undefined,
+        AwayPitcher: jsonoddsEvent.AwayPitcher || undefined,
+        HomeROT: jsonoddsEvent.HomeROT || undefined,
+        AwayROT: jsonoddsEvent.AwayROT || undefined,
+        LastUpdated: admin.firestore.Timestamp.now(),
         Created: isCreated,
         status: 'Ready'
       }
