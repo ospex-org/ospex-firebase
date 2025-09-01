@@ -304,8 +304,8 @@ const sportsConfig = {
   NCAAF: {
     preseasonStart: '2024-12-31', // TBD
     preseasonEnd: '2024-12-31', // TBD
-    seasonStart: '2024-12-31', // TBD
-    seasonEnd: '2024-12-31', // TBD
+    seasonStart: '2025-09-01',
+    seasonEnd: '2025-12-13',
     postseasonStart: '2024-12-31', // TBD
     postseasonEnd: '2024-12-31', // TBD
     daysAheadPreseason: 21,
