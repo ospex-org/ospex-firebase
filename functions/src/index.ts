@@ -1,149 +1,1037 @@
-// import {onRequest} from "firebase-functions/v2/https";
-// import * as logger from "firebase-functions/logger";
-
 import * as functions from "firebase-functions";
-import {ethers} from "ethers";
-import admin from "firebase-admin";
-import {Timestamp} from "firebase-admin/firestore";
-import dotenv from "dotenv";
-import ContestOracleResolvedABI from "./ContestOracleResolved.json";
-import CFPv1ABI from "./CFPv1.json";
-
-dotenv.config();
+import * as admin from "firebase-admin";
+import { AbiCoder } from "ethers";
 admin.initializeApp();
+
+const { Timestamp, FieldValue } = admin.firestore;
+
 const db = admin.firestore();
 
-const provider = new ethers.JsonRpcProvider(process.env.POLYGON_RPC_URL);
-const contestContractAddress = process.env.CONTESTORACLERESOLVED_ADDRESS;
-const contestContract = new ethers.Contract(
-  contestContractAddress!, ContestOracleResolvedABI, provider
-);
-const speculationContractAddress = process.env.CFP_ADDRESS;
-const speculationContract = new ethers.Contract(
-  speculationContractAddress!, CFPv1ABI, provider
-);
+// Event Handler Registry - Add new events here as they're implemented
+interface EventHandler {
+  eventName: string;
+  eventHash: string;
+  dataSchema: string[]; // ABI types for decoding
+  handler: (decodedData: any[], eventData: any) => Promise<void>;
+}
 
-export const listenForContestCreation = functions.pubsub.schedule(
-  "every 1 minutes"
-).onRun(async (context) => {
-  // eslint-disable-next-line new-cap
-  const eventFilter = contestContract.filters.ContestCreated();
-  const fromBlock = parseInt(process.env.CONTESTORACLERESOLVED_LATEST || "0");
-  const events = await contestContract.queryFilter(eventFilter, fromBlock);
+const EVENT_HANDLERS: EventHandler[] = [
+  {
+    eventName: "CONTEST_CREATED",
+    eventHash: "0x8b7310c24026089e2276294322070f3559697dbd233850442c46698089d2212a",
+    dataSchema: ["uint256", "string", "string", "string", "address", "bytes32"],
+    handler: async (decodedData, eventData) => {
+      const [contestId, rundownId, sportspageId, jsonoddsId, contestCreator, scoreContestSourceHash] = decodedData;
+      console.log("CONTEST_CREATED:", { contestId: contestId.toString(), rundownId, sportspageId, jsonoddsId });
 
-  for (const event of events) {
-    try {
-      // Type assertion to access the args property
-      const eventData = (event as any).args;
-      const contestIdStr = eventData.contestId.toString();
-      if (eventData) {
+      // Look up contest by jsonoddsID in amoyContestsv2.2
+      const amoyContestsRef = db.collection("amoyContestsv2.2");
+      const querySnapshot = await amoyContestsRef.where("jsonoddsID", "==", jsonoddsId.toString()).get();
+      if (!querySnapshot.empty) {
+        console.log(`Contest with jsonoddsID ${jsonoddsId.toString()} already exists in amoyContestsv2.2, skipping.`);
+      } else {
+        // Copy from contests collection
         const contestsRef = db.collection("contests");
-        const querySnapshot = await contestsRef.where(
-          "jsonoddsID", "==", eventData.jsonoddsId).get();
-
-        if (!querySnapshot.empty) {
-          querySnapshot.forEach(async (doc) => {
-            await doc.ref.update({
-              Created: true,
-              contestId: contestIdStr,
-              status: "Created",
+        const contestsSnapshot = await contestsRef.where("jsonoddsID", "==", jsonoddsId.toString()).get();
+        if (!contestsSnapshot.empty) {
+          for (const doc of contestsSnapshot.docs) {
+            const data = doc.data();
+            const { Created, ...rest } = data;
+            await amoyContestsRef.doc(contestId.toString()).set({
+              ...rest,
+              contestId: contestId.toString(),
+              contestCreator: contestCreator.toLowerCase(),
+              scoreContestSourceHash: scoreContestSourceHash,
+              status: 'Unverified',
             });
-            console.log(`Contest with JsonOddsID ${eventData.jsonoddsId} 
-            marked as created, contestId set to ${contestIdStr}`);
-          });
+            console.log(`Copied contest ${contestId.toString()} to amoyContestsv2.2 from contests with status 'Unverified'.`);
+          }
         } else {
-          console.log(`Contest with JsonOddsID ${eventData.jsonoddsId} 
-          does not exist in Firestore. Skipping.`);
+          console.error(`ERROR: Contest with jsonoddsID ${jsonoddsId.toString()} not found in contests collection.`);
         }
       }
-    } catch (error) {
-      console.error("Error listening for contest creation:", error);
     }
-  }
-});
+  },
+  {
+    eventName: "CONTEST_VERIFIED",
+    eventHash: "0x02cbb0ceffdfccf943861853e3813e29364ccff7b8d2006c7551ce8b933a5fa1",
+    dataSchema: ["uint256", "uint256"],
+    handler: async (decodedData, eventData) => {
+      const [contestId, startTime] = decodedData;
+      console.log("[CONTEST_VERIFIED] contestId:", contestId.toString(), "startTime:", startTime.toString());
 
-export const listenForSpeculationCreation = functions.pubsub.schedule(
-  "every 1 minutes"
-).onRun(async (context) => {
-  // eslint-disable-next-line new-cap
-  const eventFilter = speculationContract.filters.SpeculationCreated();
-  const fromBlock = parseInt(process.env.CFP_LATEST || "0");
-  const events = await speculationContract
-    .queryFilter(eventFilter, fromBlock);
-
-  for (const event of events) {
-    try {
-      // Type assertion to access the args property
-      const eventData = (event as any).args;
-      const {
-        lockTime,
-        speculationScorer,
-        speculationCreator} = eventData;
-      const speculationIdStr = eventData.speculationId.toString();
-      const contestIdStr = eventData.contestId.toString();
-      const theNumberInt = Number(eventData.theNumber);
-      const lockTimeDate = admin.firestore.Timestamp
-        .fromDate(new Date(Number(lockTime) * 1000));
-      // Skip speculations that occur in the past
-      if (lockTimeDate <= Timestamp.now()) {
-        console.log(`Speculation ${speculationIdStr}
-          occurs in the past and will not be added.`);
-        continue;
+      const amoyContestsRef = db.collection("amoyContestsv2.2");
+      const contestDoc = amoyContestsRef.doc(contestId.toString());
+      const docSnapshot = await contestDoc.get();
+      if (docSnapshot.exists) {
+        await contestDoc.update({
+          status: 'Verified',
+          startTime: startTime.toString(),
+        });
+        console.log(`Updated contest ${contestId.toString()} status to 'Verified' in amoyContestsv2.2.`);
+      } else {
+        console.log(`No contest found in amoyContestsv2.2 for contestId ${contestId.toString()}, skipping verification update.`);
       }
-      const speculationIdentifier =
-        `${contestIdStr}-${speculationScorer.toLowerCase()}`;
-      const speculationRef = db.collection("speculations")
-        .doc(speculationIdentifier);
-      await speculationRef.update({
-        speculationId: speculationIdStr,
-        contestId: contestIdStr,
-        lockTime: lockTimeDate,
-        speculationScorer: speculationScorer.toLowerCase(),
-        theNumber: theNumberInt,
-        speculationCreator: speculationCreator,
-        status: "Created",
+    }
+  },
+  {
+    eventName: "CONTEST_MARKETS_UPDATED",
+    eventHash: "0xe8330a188b17773dfe2bce7fc47f33eef36d3ff516cf68ec5e5b51f508131631",
+    dataSchema: ["uint256", "uint32", "int32", "int32", "uint64", "uint64", "uint64", "uint64", "uint64", "uint64"],
+    handler: async (decodedData, eventData) => {
+      const [contestId, timestamp, spreadNumber, totalNumber, moneylineAwayOdds, moneylineHomeOdds, spreadAwayOdds, spreadHomeOdds, overOdds, underOdds] = decodedData;
+      console.log("CONTEST_MARKETS_UPDATED:", { 
+        contestId: contestId.toString(), 
+        timestamp: timestamp.toString(),
+        spreadNumber: spreadNumber.toString(),
+        totalNumber: totalNumber.toString(),
+        moneylineAwayOdds: moneylineAwayOdds.toString(),
+        moneylineHomeOdds: moneylineHomeOdds.toString(),
+        spreadAwayOdds: spreadAwayOdds.toString(),
+        spreadHomeOdds: spreadHomeOdds.toString(),
+        overOdds: overOdds.toString(),
+        underOdds: underOdds.toString()
       });
-      console.log(`Speculation ${speculationIdStr} 
-        for contest ${contestIdStr} added to Firestore.`);
-    } catch (error) {
-      console.error("Error listening for speculation creation:", error);
+
+      // Update contest in amoyContestsv2.2 collection with on-chain odds
+      const amoyContestsRef = db.collection("amoyContestsv2.2");
+      const contestDoc = amoyContestsRef.doc(contestId.toString());
+      const docSnapshot = await contestDoc.get();
+      
+      if (docSnapshot.exists) {
+        // Convert odds from contract format (e.g., 11500000) to display format (e.g., "+115")
+        const formatOdds = (odds: any): string => {
+          const oddsNum = parseInt(odds.toString());
+          const decimalOdds = oddsNum / 10000000; // Convert from 1e7 precision
+          if (decimalOdds >= 2.0) {
+            // Positive American odds: (decimal - 1) * 100
+            return `+${Math.round((decimalOdds - 1) * 100)}`;
+          } else {
+            // Negative American odds: -100 / (decimal - 1)
+            return `${Math.round(-100 / (decimalOdds - 1))}`;
+          }
+        };
+
+        // Format spread number (contract uses int32, convert to string with sign)
+        // Contract stores in increments of 10 (e.g., 15 = 1.5, -25 = -2.5)
+        const spreadNum = parseInt(spreadNumber.toString());
+        const awaySpread = spreadNum > 0 ? `+${spreadNum / 10}` : `${spreadNum / 10}`;
+        const homeSpread = spreadNum > 0 ? `-${spreadNum / 10}` : `+${Math.abs(spreadNum) / 10}`;
+
+        // Format total number (contract stores in increments of 10, e.g., 95 = 9.5)
+        const totalNum = (parseInt(totalNumber.toString()) / 10).toString();
+
+        await contestDoc.update({
+          // Update with on-chain odds (overwrite starter odds)
+          MoneyLineAway: formatOdds(moneylineAwayOdds),
+          MoneyLineHome: formatOdds(moneylineHomeOdds),
+          PointSpreadAway: awaySpread,
+          PointSpreadHome: homeSpread,
+          PointSpreadAwayLine: formatOdds(spreadAwayOdds),
+          PointSpreadHomeLine: formatOdds(spreadHomeOdds),
+          TotalNumber: totalNum,
+          OverLine: formatOdds(overOdds),
+          UnderLine: formatOdds(underOdds),
+          
+          // Add new field to track on-chain odds updates
+          onChainOddsLastUpdated: Timestamp.fromDate(new Date(parseInt(timestamp.toString()) * 1000)),
+          
+          // Keep original LastUpdated for starter odds reference  
+          updatedAt: Timestamp.now(),
+        });
+        
+        console.log(`Updated contest ${contestId.toString()} with on-chain odds from oracle`);
+      } else {
+        console.log(`No contest found in amoyContestsv2.2 for contestId ${contestId.toString()}, skipping market update.`);
+      }
+    }
+  },
+  {
+    eventName: "SPECULATION_CREATED",
+    eventHash: "0x2f8c9d74e5c685587d29d55b2199da566ef57c9ecb168f3a0d0cf02733475a1f",
+    dataSchema: ["uint256", "uint256", "address", "int32", "address"],
+    handler: async (decodedData, eventData) => {
+      const [speculationId, contestId, scorer, theNumber, speculationCreator] = decodedData;
+      console.log("SPECULATION_CREATED:", { 
+        speculationId: speculationId.toString(), 
+        contestId: contestId.toString(), 
+        scorer, 
+        theNumber: theNumber.toString(),
+        speculationCreator
+      });
+
+      // Store speculation in amoySpeculationsv2.2 collection
+      const amoySpeculationsRef = db.collection("amoySpeculationsv2.2");
+      
+      // Check if speculation ID already exists (blockchain-level duplicate)
+      const speculationDoc = amoySpeculationsRef.doc(speculationId.toString());
+      const docSnapshot = await speculationDoc.get();
+      
+      if (docSnapshot.exists) {
+        console.log(`Speculation ${speculationId.toString()} already exists in amoySpeculationsv2.2, skipping.`);
+        return;
+      }
+
+      // Check for functional duplicates (same contest, scorer, and number)
+      const duplicateQuery = await amoySpeculationsRef
+        .where("contestId", "==", contestId.toString())
+        .where("speculationScorer", "==", scorer.toLowerCase())
+        .where("theNumber", "==", theNumber.toString())
+        .limit(1)
+        .get();
+
+      if (!duplicateQuery.empty) {
+        const existingSpeculation = duplicateQuery.docs[0];
+        console.log(`Duplicate speculation detected! Skipping speculation ${speculationId.toString()}.`);
+        console.log(`Existing speculation: ${existingSpeculation.id} with same contestId: ${contestId.toString()}, scorer: ${scorer}, theNumber: ${theNumber.toString()}`);
+        return;
+      }
+
+      // Create new speculation document (no duplicates found)
+      await speculationDoc.set({
+        speculationId: speculationId.toString(),
+        contestId: contestId.toString(),
+        speculationCreator: speculationCreator.toLowerCase(),
+        speculationScorer: scorer.toLowerCase(),
+        theNumber: theNumber.toString(),
+        speculationStatus: 0, // 0 = Open, 1 = Closed
+        winSide: 0, // 0 = TBD
+        createdAt: Timestamp.now(),
+        // Note: startTimestamp is now stored on the contest, not the speculation
+      });
+      console.log(`Created unique speculation ${speculationId.toString()} in amoySpeculationsv2.2.`);
+    }
+  },
+  {
+    eventName: "CONTEST_SCORES_SET",
+    eventHash: "0x637ab89ed933b7546cbd950d2e56492ddeaacfdd7dff7eb57b56eddd5a4f9bc1",
+    dataSchema: ["uint256", "uint32", "uint32"],
+    handler: async (decodedData, eventData) => {
+      const [contestId, awayScore, homeScore] = decodedData;
+      console.log("CONTEST_SCORES_SET:", { 
+        contestId: contestId.toString(), 
+        awayScore: awayScore.toString(), 
+        homeScore: homeScore.toString() 
+      });
+
+      const amoyContestsRef = db.collection("amoyContestsv2.2");
+      const contestDoc = amoyContestsRef.doc(contestId.toString());
+      const docSnapshot = await contestDoc.get();
+      
+      if (docSnapshot.exists) {
+        await contestDoc.update({
+          status: 'Scored',
+          awayScore: awayScore.toString(),
+          homeScore: homeScore.toString(),
+          scoredAt: Timestamp.now(),
+        });
+        console.log(`Updated contest ${contestId.toString()} with scores - Away: ${awayScore.toString()}, Home: ${homeScore.toString()}, status: 'Scored'`);
+      } else {
+        console.log(`No contest found in amoyContestsv2.2 for contestId ${contestId.toString()}, skipping score update.`);
+      }
+    }
+  },
+  {
+    eventName: "SPECULATION_SETTLED",
+    eventHash: "0xf5e6867f6725bf093b143d57dc9fe0b6c610b2553ba52461d0544c97d908d4f4",
+    dataSchema: ["uint256", "uint8", "address"],
+    handler: async (decodedData, eventData) => {
+      const [speculationId, winner, scorer] = decodedData;
+      console.log("SPECULATION_SETTLED:", { 
+        speculationId: speculationId.toString(), 
+        winner: winner.toString(),
+        scorer: scorer.toLowerCase()
+      });
+
+      // Update speculation in amoySpeculationsv2.2 collection
+      const amoySpeculationsRef = db.collection("amoySpeculationsv2.2");
+      const speculationDoc = amoySpeculationsRef.doc(speculationId.toString());
+      const docSnapshot = await speculationDoc.get();
+      
+      if (docSnapshot.exists) {
+        await speculationDoc.update({
+          speculationStatus: 1, // 1 = Closed
+          winSide: winner, // WinSide enum value from the event
+          settledAt: Timestamp.now(),
+        });
+        console.log(`Updated speculation ${speculationId.toString()} - Status: Closed, WinSide: ${winner.toString()}`);
+      } else {
+        console.log(`No speculation found in amoySpeculationsv2.2 for speculationId ${speculationId.toString()}, skipping settlement update.`);
+      }
+    }
+  },
+  {
+    eventName: "POSITION_CREATED",
+    eventHash: "0x8516611167c28bf928ba43c90eb7238b770f757c1131cb049dfe84f96c9f9ca4",
+    dataSchema: ["uint256", "address", "uint128", "uint32", "uint8", "uint256"],
+    handler: async (decodedData, eventData) => {
+      const [speculationId, user, oddsPairId, unmatchedExpiry, positionType, amount] = decodedData;
+      console.log("POSITION_CREATED:", { 
+        speculationId: speculationId.toString(), 
+        user: user.toLowerCase(),
+        oddsPairId: oddsPairId.toString(),
+        unmatchedExpiry: unmatchedExpiry.toString(),
+        positionType: positionType.toString(),
+        amount: amount.toString()
+      });
+
+      // Store position in amoyPositionsv2.2 collection
+      const amoyPositionsRef = db.collection("amoyPositionsv2.2");
+      
+      // Create unique document ID: speculationId_user_oddsPairId_positionType
+      const docId = `${speculationId.toString()}_${user.toLowerCase()}_${oddsPairId.toString()}_${positionType.toString()}`;
+      const positionDoc = amoyPositionsRef.doc(docId);
+      
+      // Check if position already exists
+      const docSnapshot = await positionDoc.get();
+      
+      if (docSnapshot.exists) {
+        console.log(`Position ${docId} already exists in amoyPositionsv2.2, updating with new data.`);
+        // Update existing position (in case of adjustments)
+        await positionDoc.update({
+          unmatchedAmount: amount.toString(), // Initially all unmatched
+          matchedAmount: "0",
+          unmatchedExpiry: unmatchedExpiry.toString(),
+          updatedAt: Timestamp.now(),
+        });
+        console.log(`Updated position ${docId} in amoyPositionsv2.2.`);
+      } else {
+        // Create new position document
+        const positionTypeString = positionType.toString() === "0" ? "Upper" : "Lower";
+        
+        await positionDoc.set({
+          speculationId: speculationId.toString(),
+          user: user.toLowerCase(),
+          oddsPairId: oddsPairId.toString(),
+          positionType: positionType.toString(),
+          positionTypeString: positionTypeString,
+          matchedAmount: "0",
+          unmatchedAmount: amount.toString(),
+          unmatchedExpiry: unmatchedExpiry.toString(),
+          claimed: false,
+          createdAt: Timestamp.now(),
+        });
+        console.log(`Created position ${docId} in amoyPositionsv2.2.`);
+      }
+    }
+  },
+  {
+    eventName: "POSITION_MATCHED",
+    eventHash: "0x78090ba6e58711a2fb7123d0979a7618a576580e7ee98ec925208809aa9ea711",
+    dataSchema: ["uint256", "address", "uint128", "uint8", "address", "uint256"],
+    handler: async (decodedData, eventData) => {
+      const [speculationId, maker, oddsPairId, makerPositionType, taker, amount] = decodedData;
+      console.log("POSITION_MATCHED:", { 
+        speculationId: speculationId.toString(), 
+        maker: maker.toLowerCase(),
+        oddsPairId: oddsPairId.toString(),
+        makerPositionType: makerPositionType.toString(),
+        taker: taker.toLowerCase(),
+        amount: amount.toString()
+      });
+
+      const amoyPositionsRef = db.collection("amoyPositionsv2.2");
+      
+      // Get the maker's position to calculate how much gets matched
+      const makerDocId = `${speculationId.toString()}_${maker.toLowerCase()}_${oddsPairId.toString()}_${makerPositionType.toString()}`;
+      const makerDoc = amoyPositionsRef.doc(makerDocId);
+      const makerSnapshot = await makerDoc.get();
+      
+      if (!makerSnapshot.exists) {
+        console.error(`ERROR: Maker position ${makerDocId} not found in amoyPositionsv2.2.`);
+        return;
+      }
+
+      const makerData = makerSnapshot.data();
+      if (!makerData) {
+        console.error(`ERROR: Maker position data is null for ${makerDocId}.`);
+        return;
+      }
+      
+      // Calculate exact odds from oddsPairId using the same logic as the smart contract
+      const ODDS_PRECISION = 10_000_000; // 1e7
+      const ODDS_INCREMENT = 100_000; // 0.01
+      const MIN_ODDS = 10_100_000; // 1.01
+      
+      // Determine if this is Upper or Lower position and calculate base odds
+      const oddsPairIdNum = parseInt(oddsPairId.toString());
+      const isLowerPosition = oddsPairIdNum >= 10000;
+      const baseOddsPairId = isLowerPosition ? oddsPairIdNum - 10000 : oddsPairIdNum;
+      
+      // Calculate the smaller odds (the one used to generate the oddsPairId)
+      const smallerOdds = (baseOddsPairId * ODDS_INCREMENT) + MIN_ODDS;
+      
+      // Calculate inverse odds
+      const numerator = ODDS_PRECISION * ODDS_PRECISION;
+      const denominator = smallerOdds - ODDS_PRECISION;
+      const exactInverse = Math.floor(numerator / denominator) + ODDS_PRECISION;
+      
+      // Determine upperOdds and lowerOdds (following Solidity logic)
+      let upperOdds: number;
+      let lowerOdds: number;
+      
+      // For oddsPairId >= 10000 (Lower position created the pair)
+      if (isLowerPosition) {
+        // Lower position was created with smallerOdds (the favorite), so:
+        // Upper (dog) gets the inverse (higher) odds
+        // Lower (favorite) gets the smaller odds
+        upperOdds = exactInverse;
+        lowerOdds = smallerOdds;
+      } else {
+        // Upper position was created with smallerOdds (the favorite), so:
+        // Upper (favorite) gets the smaller odds
+        // Lower (dog) gets the inverse (higher) odds
+        upperOdds = smallerOdds;
+        lowerOdds = exactInverse;
+      }
+      
+      // Calculate maker amount consumed using exact contract logic (matches Solidity)
+      const makerPositionTypeNum = parseInt(makerPositionType.toString());
+      // Use opposite odds: Upper maker uses lowerOdds, Lower maker uses upperOdds
+      const oppositeOdds = makerPositionTypeNum === 0 ? lowerOdds : upperOdds;
+      const makerAmountConsumed = Math.floor((parseInt(amount.toString()) * (oppositeOdds - ODDS_PRECISION)) / ODDS_PRECISION);
+      
+      console.log(`🔍 ENHANCED ODDS CALCULATION DEBUG for oddsPairId=${oddsPairId}:`, {
+        // Input values
+        oddsPairId: oddsPairId.toString(),
+        takerAmount: amount.toString(),
+        makerPositionType: makerPositionType.toString(),
+        maker: maker.toLowerCase(),
+        taker: taker.toLowerCase(),
+        // Calculation steps
+        isLowerPosition,
+        baseOddsPairId,
+        smallerOdds,
+        exactInverse,
+        upperOdds,
+        lowerOdds,
+        oppositeOdds,
+        // Final results
+        makerAmountConsumed,
+        makerAmountConsumedUSDC: makerAmountConsumed / 1000000,
+        takerAmountUSDC: parseInt(amount.toString()) / 1000000,
+        // Verification calculations
+        expectedRatio: oppositeOdds / ODDS_PRECISION,
+        calculationFormula: `${amount.toString()} * (${oppositeOdds} - ${ODDS_PRECISION}) / ${ODDS_PRECISION}`,
+        rawCalculation: (parseInt(amount.toString()) * (oppositeOdds - ODDS_PRECISION)) / ODDS_PRECISION
+      });
+      
+      // Update maker's position
+      const newMakerMatchedAmount = (parseInt(makerData.matchedAmount) + parseInt(makerAmountConsumed.toString())).toString();
+      const newMakerUnmatchedAmount = (parseInt(makerData.unmatchedAmount) - parseInt(makerAmountConsumed.toString())).toString();
+      
+      // Handle counterparty tracking with proper aggregation
+      const currentCounterparties = makerData.counterparties || [];
+      const currentCounterpartyAmounts = makerData.counterpartyAmounts || [];
+      const takerLower = taker.toLowerCase();
+      
+      // Find if this taker already exists in counterparties
+      const existingIndex = currentCounterparties.indexOf(takerLower);
+      let newCounterparties = [...currentCounterparties];
+      let newCounterpartyAmounts = [...currentCounterpartyAmounts];
+      
+      if (existingIndex >= 0) {
+        // Taker already exists - add to their existing amount
+        const existingAmount = parseInt(currentCounterpartyAmounts[existingIndex] || "0");
+        const newAmount = existingAmount + parseInt(amount.toString());
+        newCounterpartyAmounts[existingIndex] = newAmount.toString();
+      } else {
+        // New taker - add to end of arrays
+        newCounterparties.push(takerLower);
+        newCounterpartyAmounts.push(amount.toString());
+      }
+      
+      await makerDoc.update({
+        matchedAmount: newMakerMatchedAmount,
+        unmatchedAmount: newMakerUnmatchedAmount,
+        counterparties: newCounterparties,
+        counterpartyAmounts: newCounterpartyAmounts,
+        updatedAt: Timestamp.now(),
+      });
+      
+      console.log(`🔍 MAKER POSITION UPDATE - ${makerDocId}:`, {
+        previousMatched: makerData.matchedAmount,
+        newMatchedAmount: newMakerMatchedAmount,
+        previousUnmatched: makerData.unmatchedAmount,
+        newUnmatchedAmount: newMakerUnmatchedAmount,
+        makerAmountConsumed,
+        addedTaker: taker.toLowerCase(),
+        takerAmountAdded: amount.toString(),
+        newCounterparties,
+        newCounterpartyAmounts,
+        totalCounterpartyAmountsSum: newCounterpartyAmounts.reduce((sum, amt) => sum + parseInt(amt), 0)
+      });
+
+      // Create taker position with opposite position type
+      const takerPositionType = makerPositionType.toString() === "0" ? "1" : "0"; // Upper(0) -> Lower(1), Lower(1) -> Upper(0)
+      const takerPositionTypeString = takerPositionType === "0" ? "Upper" : "Lower";
+      
+      const takerDocId = `${speculationId.toString()}_${taker.toLowerCase()}_${oddsPairId.toString()}_${takerPositionType}`;
+      const takerDoc = amoyPositionsRef.doc(takerDocId);
+      const takerSnapshot = await takerDoc.get();
+      
+      if (takerSnapshot.exists) {
+        // Update existing taker position
+        const takerData = takerSnapshot.data();
+        if (!takerData) {
+          console.error(`ERROR: Taker position data is null for ${takerDocId}.`);
+          return;
+        }
+        const newTakerMatchedAmount = (parseInt(takerData.matchedAmount) + parseInt(amount.toString())).toString();
+        
+        // Handle counterparty tracking with proper aggregation for taker
+        const currentTakerCounterparties = takerData.counterparties || [];
+        const currentTakerCounterpartyAmounts = takerData.counterpartyAmounts || [];
+        const makerLower = maker.toLowerCase();
+        
+        // Find if this maker already exists in taker's counterparties
+        const existingMakerIndex = currentTakerCounterparties.indexOf(makerLower);
+        let newTakerCounterparties = [...currentTakerCounterparties];
+        let newTakerCounterpartyAmounts = [...currentTakerCounterpartyAmounts];
+        
+        if (existingMakerIndex >= 0) {
+          // Maker already exists - add to their existing amount (use maker amount consumed - what the maker put up)
+          const existingMakerAmount = parseInt(currentTakerCounterpartyAmounts[existingMakerIndex] || "0");
+          const newMakerAmount = existingMakerAmount + parseInt(makerAmountConsumed.toString());
+          newTakerCounterpartyAmounts[existingMakerIndex] = newMakerAmount.toString();
+        } else {
+          // New maker - add to end of arrays (use maker amount consumed - what the maker put up)
+          newTakerCounterparties.push(makerLower);
+          newTakerCounterpartyAmounts.push(makerAmountConsumed.toString());
+        }
+        
+        await takerDoc.update({
+          matchedAmount: newTakerMatchedAmount,
+          counterparties: newTakerCounterparties,
+          counterpartyAmounts: newTakerCounterpartyAmounts,
+          updatedAt: Timestamp.now(),
+        });
+        
+        console.log(`🔍 TAKER POSITION UPDATE (existing) - ${takerDocId}:`, {
+          previousMatched: takerData.matchedAmount,
+          newTakerMatchedAmount,
+          takerAmountAdded: amount.toString(),
+          makerAmountConsumed,
+          newTakerCounterparties,
+          newTakerCounterpartyAmounts,
+          totalTakerCounterpartySum: newTakerCounterpartyAmounts.reduce((sum, amt) => sum + parseInt(amt), 0)
+        });
+      } else {
+        // Create new taker position
+        await takerDoc.set({
+          speculationId: speculationId.toString(),
+          user: taker.toLowerCase(),
+          oddsPairId: oddsPairId.toString(),
+          positionType: takerPositionType,
+          positionTypeString: takerPositionTypeString,
+          matchedAmount: amount.toString(),
+          unmatchedAmount: "0",
+          unmatchedExpiry: "0",
+          claimed: false,
+          counterparties: [maker.toLowerCase()],
+          counterpartyAmounts: [makerAmountConsumed.toString()], // What the maker put up (consumed)
+          createdAt: Timestamp.now(),
+        });
+        
+        console.log(`🔍 TAKER POSITION CREATE (new) - ${takerDocId}:`, {
+          takerMatchedAmount: amount.toString(),
+          makerAmountConsumed,
+          positionType: takerPositionType,
+          positionTypeString: takerPositionTypeString,
+          counterparties: [maker.toLowerCase()],
+          counterpartyAmounts: [makerAmountConsumed.toString()]
+        });
+      }
+    }
+  },
+  {
+    eventName: "POSITION_ADJUSTED",
+    eventHash: "0x9e26edc8d44650e20c5900c65e3c552e0e50ab077836dd27d40286c92142b72b",
+    dataSchema: ["uint256", "address", "uint128", "uint32", "uint8", "int256"],
+    handler: async (decodedData, eventData) => {
+      const [speculationId, user, oddsPairId, newUnmatchedExpiry, positionType, amount] = decodedData;
+      console.log("POSITION_ADJUSTED:", { 
+        speculationId: speculationId.toString(), 
+        user: user.toLowerCase(),
+        oddsPairId: oddsPairId.toString(),
+        newUnmatchedExpiry: newUnmatchedExpiry.toString(),
+        positionType: positionType.toString(),
+        amount: amount.toString()
+      });
+
+      const amoyPositionsRef = db.collection("amoyPositionsv2.2");
+      
+      // Create unique document ID: speculationId_user_oddsPairId_positionType
+      const docId = `${speculationId.toString()}_${user.toLowerCase()}_${oddsPairId.toString()}_${positionType.toString()}`;
+      const positionDoc = amoyPositionsRef.doc(docId);
+      
+      // Check if position exists
+      const docSnapshot = await positionDoc.get();
+      
+      if (docSnapshot.exists) {
+        const currentData = docSnapshot.data();
+        if (!currentData) {
+          console.error(`ERROR: Position data is null for ${docId}.`);
+          return;
+        }
+        
+        // Calculate new unmatched amount based on adjustment
+        const currentUnmatched = parseInt(currentData.unmatchedAmount || "0");
+        const adjustmentAmount = parseInt(amount.toString());
+        const newUnmatchedAmount = (currentUnmatched + adjustmentAmount).toString();
+        
+        // Prepare update object
+        const updateData: any = {
+          unmatchedAmount: newUnmatchedAmount,
+          updatedAt: Timestamp.now(),
+        };
+        
+        // Update expiry if provided (non-zero value)
+        if (newUnmatchedExpiry.toString() !== "0") {
+          updateData.unmatchedExpiry = newUnmatchedExpiry.toString();
+        }
+        
+        await positionDoc.update(updateData);
+        
+        console.log(`Updated position ${docId} - adjustment: ${adjustmentAmount}, new unmatched: ${newUnmatchedAmount}${newUnmatchedExpiry.toString() !== "0" ? `, new expiry: ${newUnmatchedExpiry.toString()}` : ""}`);
+      } else {
+        console.log(`Position ${docId} not found for adjustment, skipping.`);
+      }
+    }
+  },
+  {
+    eventName: "POSITION_CLAIMED",
+    eventHash: "0x2e7ffcffc5b9e7430e9ceb78e1e29f5261f21e812531be1ae93b7368fda42b60",
+    dataSchema: ["uint256", "address", "uint128", "uint8", "uint256"],
+    handler: async (decodedData, eventData) => {
+      const [speculationId, user, oddsPairId, positionType, payout] = decodedData;
+      console.log("POSITION_CLAIMED:", { 
+        speculationId: speculationId.toString(), 
+        user: user.toLowerCase(), 
+        oddsPairId: oddsPairId.toString(),
+        positionType: positionType.toString(),
+        payout: payout.toString()
+      });
+
+      // Update the position document in amoyPositionsv2.2
+      const positionsRef = db.collection("amoyPositionsv2.2");
+      
+      // Query to find the position document
+      // Position document ID format: speculationId_user_oddsPairId_positionType
+      const positionDocId = `${speculationId.toString()}_${user.toLowerCase()}_${oddsPairId.toString()}_${positionType.toString()}`;
+      
+      try {
+        const positionDoc = positionsRef.doc(positionDocId);
+        const positionSnapshot = await positionDoc.get();
+        
+        if (positionSnapshot.exists) {
+          // Update the position with claimed status and payout amount
+          await positionDoc.update({
+            claimed: true,
+            claimedAmount: payout.toString(),
+            claimedAt: Timestamp.now(),
+            updatedAt: Timestamp.now()
+          });
+          console.log(`Updated position ${positionDocId} with claimed: true, claimedAmount: ${payout.toString()}`);
+        } else {
+          console.error(`Position document ${positionDocId} not found in amoyPositionsv2.2`);
+        }
+      } catch (error) {
+        console.error(`Error updating position ${positionDocId}:`, error);
+      }
+    }
+  },
+  {
+    eventName: "LEADERBOARD_CREATED",
+    eventHash: "0xb7e5d550753710baffdd105b5ce4cf1a70bb2899410f4c36fe03b15f22f5637e",
+    dataSchema: ["uint256", "uint256", "address", "uint32", "uint32", "uint32", "uint32", "uint32"],
+    handler: async (decodedData, eventData) => {
+      const [leaderboardId, entryFee, yieldStrategy, startTime, endTime, safetyPeriodDuration, roiSubmissionWindow, claimWindow] = decodedData;
+      console.log("LEADERBOARD_CREATED:", { 
+        leaderboardId: leaderboardId.toString(), 
+        entryFee: entryFee.toString(), 
+        yieldStrategy: yieldStrategy.toLowerCase(),
+        startTime: startTime.toString(),
+        endTime: endTime.toString(),
+        safetyPeriodDuration: safetyPeriodDuration.toString(),
+        roiSubmissionWindow: roiSubmissionWindow.toString(),
+        claimWindow: claimWindow.toString()
+      });
+
+      // Store leaderboard in amoyLeaderboardsv2.2 collection
+      const amoyLeaderboardsRef = db.collection("amoyLeaderboardsv2.2");
+      const leaderboardDoc = amoyLeaderboardsRef.doc(leaderboardId.toString());
+      
+      // Check if leaderboard already exists
+      const docSnapshot = await leaderboardDoc.get();
+      
+      if (docSnapshot.exists) {
+        console.log(`Leaderboard ${leaderboardId.toString()} already exists in amoyLeaderboardsv2.2, skipping.`);
+      } else {
+        // Create new leaderboard document
+        await leaderboardDoc.set({
+          leaderboardId: leaderboardId.toString(),
+          entryFee: entryFee.toString(),
+          yieldStrategy: yieldStrategy.toLowerCase(),
+          startTime: startTime.toString(),
+          endTime: endTime.toString(),
+          safetyPeriodDuration: safetyPeriodDuration.toString(),
+          roiSubmissionWindow: roiSubmissionWindow.toString(),
+          claimWindow: claimWindow.toString(),
+          prizePool: "0", // Initialize as 0
+          currentParticipants: 0,
+          createdAt: Timestamp.now(),
+        });
+        console.log(`Created leaderboard ${leaderboardId.toString()} in amoyLeaderboardsv2.2.`);
+      }
+    }
+  },
+  {
+    eventName: "LEADERBOARD_SPECULATION_ADDED",
+    eventHash: "0x1ff96f6d82caf6fb3f681e23e83e68c8d78444f4f42a499db5a604583c955976",
+    dataSchema: ["uint256", "uint256"],
+    handler: async (decodedData, eventData) => {
+      const [leaderboardId, speculationId] = decodedData;
+      console.log("LEADERBOARD_SPECULATION_ADDED:", { 
+        leaderboardId: leaderboardId.toString(), 
+        speculationId: speculationId.toString()
+      });
+
+      // Add speculationId to the leaderboard document's speculationIds array
+      const amoyLeaderboardsRef = db.collection("amoyLeaderboardsv2.2");
+      const leaderboardDoc = amoyLeaderboardsRef.doc(leaderboardId.toString());
+      
+      try {
+        // Use arrayUnion to add the speculationId if it doesn't already exist
+        await leaderboardDoc.update({
+          speculationIds: FieldValue.arrayUnion(speculationId.toString()),
+          lastSpeculationAdded: Timestamp.now()
+        });
+        console.log(`Added speculation ${speculationId.toString()} to leaderboard ${leaderboardId.toString()} speculationIds array.`);
+      } catch (error) {
+        // If the document doesn't exist or doesn't have speculationIds field, create it
+        if (error instanceof Error && error.message.includes('not-found')) {
+          console.log(`Leaderboard ${leaderboardId.toString()} not found. This shouldn't happen if leaderboard was created first.`);
+        } else {
+          // Document exists but speculationIds field doesn't exist, so set it
+          await leaderboardDoc.set({
+            speculationIds: [speculationId.toString()],
+            lastSpeculationAdded: Timestamp.now()
+          }, { merge: true });
+          console.log(`Initialized speculationIds array on leaderboard ${leaderboardId.toString()} with speculation ${speculationId.toString()}.`);
+        }
+      }
+    }
+  },
+  {
+    eventName: "USER_REGISTERED",
+    eventHash: "0xccb17a25972f03a7de7dc9037b0f601e596376b5abccb1e5fc5b2d246179ad34",
+    dataSchema: ["uint256", "address", "uint256"], // leaderboardId, userAddress, declaredBankroll
+    handler: async (decodedData, eventData) => {
+      const [leaderboardId, userAddress, declaredBankroll] = decodedData;
+      console.log("USER_REGISTERED:", { 
+        leaderboardId: leaderboardId.toString(), 
+        userAddress: userAddress.toLowerCase(),
+        declaredBankroll: declaredBankroll.toString()
+      });
+
+      // Store individual registration in amoyLeaderboardRegistrationsv2.2 collection
+      const amoyRegistrationsRef = db.collection("amoyLeaderboardRegistrationsv2.2");
+      
+      // Create unique document ID: leaderboardId_userAddress
+      const docId = `${leaderboardId.toString()}_${userAddress.toLowerCase()}`;
+      const registrationDoc = amoyRegistrationsRef.doc(docId);
+      
+      // Check if registration already exists
+      const docSnapshot = await registrationDoc.get();
+      
+      if (docSnapshot.exists) {
+        console.log(`Registration ${docId} already exists in amoyLeaderboardRegistrationsv2.2, updating with new data.`);
+        // Update existing registration (in case of re-registration)
+        await registrationDoc.update({
+          declaredBankroll: declaredBankroll.toString(),
+          updatedAt: Timestamp.now(),
+        });
+        console.log(`Updated registration ${docId} in amoyLeaderboardRegistrationsv2.2.`);
+      } else {
+        // Create new registration document
+        await registrationDoc.set({
+          leaderboardId: leaderboardId.toString(),
+          userAddress: userAddress.toLowerCase(),
+          declaredBankroll: declaredBankroll.toString(),
+          registeredAt: Timestamp.now(),
+        });
+        console.log(`Created registration ${docId} in amoyLeaderboardRegistrationsv2.2.`);
+
+        // Increment participant count in leaderboard document
+        const amoyLeaderboardsRef = db.collection("amoyLeaderboardsv2.2");
+        const leaderboardDoc = amoyLeaderboardsRef.doc(leaderboardId.toString());
+        
+        try {
+          await leaderboardDoc.update({
+            currentParticipants: FieldValue.increment(1),
+            updatedAt: Timestamp.now(),
+          });
+          console.log(`Incremented currentParticipants count for leaderboard ${leaderboardId.toString()}.`);
+        } catch (error) {
+          console.error(`Error updating participant count for leaderboard ${leaderboardId.toString()}:`, error);
+          // If leaderboard doesn't exist, create it with participant count of 1
+          await leaderboardDoc.set({
+            currentParticipants: 1,
+            updatedAt: Timestamp.now(),
+          }, { merge: true });
+          console.log(`Initialized currentParticipants to 1 for leaderboard ${leaderboardId.toString()}.`);
+        }
+      }
+    }
+  },
+  {
+    eventName: "RULE_SET",
+    eventHash: "0x92bf180c755d0ab951ed131383d931546e4ac7b5ab22d116eac9e3b6401e8a79",
+    dataSchema: ["uint256", "string", "uint256"],
+    handler: async (decodedData, eventData) => {
+      const [leaderboardId, ruleType, value] = decodedData;
+      console.log("RULE_SET:", { 
+        leaderboardId: leaderboardId.toString(), 
+        ruleType: ruleType,
+        value: value.toString()
+      });
+
+      // Update leaderboard in amoyLeaderboardsv2.2 collection
+      const amoyLeaderboardsRef = db.collection("amoyLeaderboardsv2.2");
+      const leaderboardDoc = amoyLeaderboardsRef.doc(leaderboardId.toString());
+      const docSnapshot = await leaderboardDoc.get();
+      
+      if (docSnapshot.exists) {
+        // Update existing leaderboard with the rule
+        const updateData: any = {
+          updatedAt: Timestamp.now()
+        };
+        
+        // Set the rule using the ruleType as the field name
+        updateData[ruleType] = value.toString();
+        
+        await leaderboardDoc.update(updateData);
+        console.log(`Updated leaderboard ${leaderboardId.toString()} with rule ${ruleType}: ${value.toString()}`);
+      } else {
+        console.log(`No leaderboard found in amoyLeaderboardsv2.2 for leaderboardId ${leaderboardId.toString()}, skipping rule update.`);
+      }
+    }
+  },
+  {
+    eventName: "LEADERBOARD_POSITION_ADDED",
+    eventHash: "0x3fd6b864fdc27cbf3befabeabb947dfb73d5a948368f78ca4a0a209e333cd5d5",
+    dataSchema: ["uint256", "address", "uint128", "uint8", "uint256[]", "uint256"], // speculationId, user, oddsPairId, positionType, leaderboardIds, amount
+    handler: async (decodedData, eventData) => {
+      const [speculationId, user, oddsPairId, positionType, leaderboardIds, amount] = decodedData;
+      console.log("LEADERBOARD_POSITION_ADDED:", { 
+        speculationId: speculationId.toString(), 
+        user: user.toLowerCase(),
+        oddsPairId: oddsPairId.toString(),
+        positionType: positionType.toString(),
+        leaderboardIds: leaderboardIds.map((id: any) => id.toString()),
+        amount: amount.toString()
+      });
+
+      const positionTypeString = positionType.toString() === "0" ? "Upper" : "Lower";
+      const userLower = user.toLowerCase();
+      const timestamp = Timestamp.now();
+
+      // 1. Create individual leaderboard position documents for efficient querying
+      const amoyLeaderboardPositionsRef = db.collection("amoyLeaderboardPositionsv2.2");
+      
+      for (const leaderboardId of leaderboardIds) {
+        const leaderboardIdStr = leaderboardId.toString();
+        
+        // Document ID: leaderboardId_speculationId_user_oddsPairId_positionType
+        const docId = `${leaderboardIdStr}_${speculationId.toString()}_${userLower}_${oddsPairId.toString()}_${positionType.toString()}`;
+        const leaderboardPositionDoc = amoyLeaderboardPositionsRef.doc(docId);
+        
+        // Check if already exists (handle duplicates)
+        const docSnapshot = await leaderboardPositionDoc.get();
+        
+        if (docSnapshot.exists) {
+          console.log(`Leaderboard position ${docId} already exists, updating amount.`);
+          await leaderboardPositionDoc.update({
+            amount: amount.toString(),
+            updatedAt: timestamp,
+          });
+        } else {
+          // Create new leaderboard position document
+          await leaderboardPositionDoc.set({
+            leaderboardId: leaderboardIdStr,
+            speculationId: speculationId.toString(),
+            user: userLower,
+            oddsPairId: oddsPairId.toString(),
+            positionType: positionType.toString(),
+            positionTypeString: positionTypeString,
+            amount: amount.toString(),
+            registeredAt: timestamp,
+          });
+          console.log(`Created leaderboard position ${docId} in amoyLeaderboardPositionsv2.2.`);
+        }
+      }
+
+      // 2. Update the main position document with leaderboard info for easy display
+      const amoyPositionsRef = db.collection("amoyPositionsv2.2");
+      const positionDocId = `${speculationId.toString()}_${userLower}_${oddsPairId.toString()}_${positionType.toString()}`;
+      const positionDoc = amoyPositionsRef.doc(positionDocId);
+      const positionSnapshot = await positionDoc.get();
+      
+      if (positionSnapshot.exists) {
+        const positionData = positionSnapshot.data();
+        const currentLeaderboardIds = positionData?.leaderboardIds || [];
+        const currentLeaderboardAmounts = positionData?.leaderboardAmounts || [];
+        
+        // Merge new leaderboard registrations with existing ones
+        const updatedLeaderboardIds = [...currentLeaderboardIds];
+        const updatedLeaderboardAmounts = [...currentLeaderboardAmounts];
+        
+        for (const leaderboardId of leaderboardIds) {
+          const leaderboardIdStr = leaderboardId.toString();
+          const existingIndex = updatedLeaderboardIds.indexOf(leaderboardIdStr);
+          
+          if (existingIndex >= 0) {
+            // Update existing amount
+            updatedLeaderboardAmounts[existingIndex] = amount.toString();
+          } else {
+            // Add new leaderboard registration
+            updatedLeaderboardIds.push(leaderboardIdStr);
+            updatedLeaderboardAmounts.push(amount.toString());
+          }
+        }
+        
+        await positionDoc.update({
+          leaderboardIds: updatedLeaderboardIds,
+          leaderboardAmounts: updatedLeaderboardAmounts,
+          lastLeaderboardRegistration: timestamp,
+          updatedAt: timestamp,
+        });
+        
+        console.log(`Updated position ${positionDocId} with leaderboard registrations:`, {
+          leaderboardIds: updatedLeaderboardIds,
+          amounts: updatedLeaderboardAmounts
+        });
+      } else {
+        console.log(`Position ${positionDocId} not found in amoyPositionsv2.2, cannot update with leaderboard info.`);
+      }
+
+      // 3. Update leaderboard documents with participation stats
+      const amoyLeaderboardsRef = db.collection("amoyLeaderboardsv2.2");
+      
+      for (const leaderboardId of leaderboardIds) {
+        const leaderboardIdStr = leaderboardId.toString();
+        const leaderboardDoc = amoyLeaderboardsRef.doc(leaderboardIdStr);
+        
+        try {
+          // Increment total positions count and update last activity
+          await leaderboardDoc.update({
+            totalPositions: FieldValue.increment(1),
+            lastPositionAdded: timestamp,
+            updatedAt: timestamp,
+          });
+          console.log(`Updated leaderboard ${leaderboardIdStr} position count.`);
+        } catch (error) {
+          // If leaderboard doesn't exist or field doesn't exist, initialize it
+          await leaderboardDoc.set({
+            totalPositions: 1,
+            lastPositionAdded: timestamp,
+            updatedAt: timestamp,
+          }, { merge: true });
+          console.log(`Initialized position count for leaderboard ${leaderboardIdStr}.`);
+        }
+      }
     }
   }
-});
+  // Add new event handlers here as they're implemented
+];
 
-export const checkPendingContestsAndSpeculations = functions.pubsub.schedule(
-  "every 1 minutes"
-).onRun(async (context) => {
-  const contestsRef = db.collection("contests");
-  const speculationsRef = db.collection("speculations");
-  const currentTime = admin.firestore.Timestamp.now();
-  const pendingThreshold = currentTime.toMillis() - 120000; // 2 minutes
+// Helper function to get event handler by hash
+function getEventHandler(eventHash: string): EventHandler | undefined {
+  return EVENT_HANDLERS.find(handler => handler.eventHash === eventHash);
+}
 
-  // Check pending contests
-  const pendingContestsSnapshot = await contestsRef
-    .where("status", "==", "Pending")
-    .where("pendingTime", "<=",
-      admin.firestore.Timestamp.fromMillis(pendingThreshold))
-    .get();
+// Helper function to get event handler by name
+function getEventHandlerByName(eventName: string): EventHandler | undefined {
+  return EVENT_HANDLERS.find(handler => handler.eventName === eventName);
+}
 
-  pendingContestsSnapshot.forEach(async (doc) => {
-    await doc.ref.update({status: "Ready"});
-    console.log(
-      `Contest ${doc.id} status updated to "Ready" due to timeout.`);
-  });
+export const insightWebhook = functions.https.onRequest(async (req, res) => {
+  if (req.method !== "POST") {
+    res.status(405).send("Method Not Allowed");
+    return;
+  }
 
-  // Check pending speculations
-  const pendingSpeculationsSnapshot = await speculationsRef
-    .where("status", "==", "Pending")
-    .where("pendingTime", "<=",
-      admin.firestore.Timestamp.fromMillis(pendingThreshold))
-    .get();
+  try {
+    // Log the full incoming request and timestamp
+    console.log("[Webhook received]", new Date().toISOString(), JSON.stringify(req.body, null, 2));
 
-  pendingSpeculationsSnapshot.forEach(async (doc) => {
-    await doc.ref.update({status: "Ready"});
-    console.log(
-      `Speculation ${doc.id} status updated to "Ready" due to timeout.`);
-  });
+    // Handle different webhook formats
+    let log;
+    if (req.body.data && req.body.data[0] && req.body.data[0].data) {
+      // Thirdweb format
+      log = req.body.data[0].data;
+      console.log("[Thirdweb format detected]");
+    } else if (req.body.event && req.body.event.data && req.body.event.data.block && req.body.event.data.block.logs) {
+      // Alchemy format - check if there are any logs
+      const alchemyLogs = req.body.event.data.block.logs;
+      if (alchemyLogs.length === 0) {
+        console.log("[Alchemy format - no events in this block, skipping]");
+        res.status(200).send("No events in block");
+        return;
+      }
+      // Process first log for now
+      log = alchemyLogs[0];
+      console.log("[Alchemy format detected]");
+    } else {
+      console.log("[Unknown webhook format, ignoring]");
+      res.status(200).send("Unknown format");
+      return;
+    }
+
+    // CoreEventEmitted event signature hash
+    const COREEVENTEMITTED_TOPIC = "0x05a981d03316d55f7ca9ffff0cd10dda8e9ceeea936b6fc212d46cf3f8a73364";
+
+    // Only process logs that match the CoreEventEmitted event
+    if (log.topics[0] !== COREEVENTEMITTED_TOPIC) {
+      console.log("Ignoring non-CoreEventEmitted event:", log.topics[0]);
+      res.status(200).send("Ignored non-CoreEventEmitted event");
+      return;
+    }
+
+    const eventTypeKey = log.topics[1];
+    const eventData = log.data;
+
+    // Find handler for this event
+    const eventHandler = getEventHandler(eventTypeKey);
+    const eventType = eventHandler?.eventName || eventTypeKey;
+
+    // Log eventType, eventTypeKey, and eventData with timestamp
+    console.log(`[Event received] ${new Date().toISOString()} eventType:`, eventType, "eventTypeKey:", eventTypeKey, "eventData:", eventData);
+
+    // Process event using registered handler
+    if (eventHandler) {
+      try {
+        // Decode the event data
+        const [inner] = AbiCoder.defaultAbiCoder().decode(["bytes"], eventData);
+        const decodedData = AbiCoder.defaultAbiCoder().decode(eventHandler.dataSchema, inner);
+
+        // Call the event handler
+        await eventHandler.handler(decodedData, { eventTypeKey, eventData, log });
+
+        console.log(`[Event processed] Successfully processed ${eventType}`);
+      } catch (error) {
+        console.error(`[Event error] Failed to process ${eventType}:`, error);
+      }
+    } else {
+      console.log(`[Event ignored] No handler registered for eventType: ${eventType} (${eventTypeKey})`);
+    }
+
+    res.status(200).send("ok");
+  } catch (err) {
+    console.error("Webhook error:", err);
+    res.status(500).send("Internal Server Error");
+  }
 });
 
 export const scheduledFirestoreCleanup =
@@ -156,7 +1044,7 @@ export const scheduledFirestoreCleanup =
     contestsQuerySnapshot.forEach((doc) => {
       const archiveRef = db.collection("contests_archive").doc(doc.id);
       contestsArchiveBatch.set(archiveRef,
-        {...doc.data(), archivedDate: now});
+        { ...doc.data(), archivedDate: now });
       contestsArchiveBatch.delete(doc.ref);
     });
 
@@ -167,7 +1055,7 @@ export const scheduledFirestoreCleanup =
     speculationsQuerySnapshot.forEach((doc) => {
       const archiveRef = db.collection("speculations_archive").doc(doc.id);
       speculationsArchiveBatch.set(archiveRef,
-        {...doc.data(), archivedDate: now});
+        { ...doc.data(), archivedDate: now });
       speculationsArchiveBatch.delete(doc.ref);
     });
 
@@ -181,3 +1069,126 @@ export const scheduledFirestoreCleanup =
       console.error("Error during Firestore cleanup:", error);
     }
   });
+
+// Generic function to sync missed events for any event type
+export const syncMissedEvents = functions.https.onCall(async (data, context) => {
+  try {
+    console.log("[Manual Sync] Starting sync for missed events...");
+
+    const eventTypesToSync = data.eventTypes || EVENT_HANDLERS.map(h => h.eventName);
+    console.log(`[Manual Sync] Syncing event types: ${eventTypesToSync.join(', ')}`);
+
+    let totalSynced = 0;
+    const results: any = {};
+
+    // Sync each event type
+    for (const eventTypeName of eventTypesToSync) {
+      const eventHandler = getEventHandlerByName(eventTypeName);
+      if (!eventHandler) {
+        console.log(`[Manual Sync] No handler found for event type: ${eventTypeName}`);
+        continue;
+      }
+
+      console.log(`[Manual Sync] Syncing ${eventTypeName} events...`);
+
+      try {
+        const syncedCount = await syncEventType(eventHandler);
+        results[eventTypeName] = syncedCount;
+        totalSynced += syncedCount;
+        console.log(`[Manual Sync] Synced ${syncedCount} ${eventTypeName} events`);
+      } catch (error) {
+        console.error(`[Manual Sync] Error syncing ${eventTypeName}:`, error);
+        results[eventTypeName] = { error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+    console.log(`[Manual Sync] Completed. Total synced: ${totalSynced}`);
+    return { totalSynced, results };
+  } catch (error) {
+    console.error("[Manual Sync] Error:", error);
+    throw new functions.https.HttpsError('internal', 'Sync failed');
+  }
+});
+
+// Helper function to sync a specific event type
+async function syncEventType(eventHandler: EventHandler): Promise<number> {
+  const polygonScanKey = functions.config().polygonscan?.api_key || 'YourKey';
+
+  // Get recent events from blockchain (last 1000 blocks for efficiency)
+  const response = await fetch(
+    `https://amoy.polygonscan.com/api?module=logs&action=getLogs&address=0x8A583cc9282CC6dC735389d2Ca7Ea7Df3A2D3f7b&topic0=0x05a981d03316d55f7ca9ffff0cd10dda8e9ceeea936b6fc212d46cf3f8a73364&topic1=${eventHandler.eventHash}&fromBlock=-1000&toBlock=latest&apikey=${polygonScanKey}`);
+
+  if (!response.ok) {
+    throw new Error(`PolygonScan API failed: ${response.statusText}`);
+  }
+
+  const result = await response.json();
+
+  if (result.status !== "1" || !result.result || result.result.length === 0) {
+    console.log(`[Sync ${eventHandler.eventName}] No recent events found`);
+    return 0;
+  }
+
+  let syncedCount = 0;
+
+  for (const log of result.result) {
+    try {
+      // Decode the event data
+      const [inner] = AbiCoder.defaultAbiCoder().decode(["bytes"], log.data);
+      const decodedData = AbiCoder.defaultAbiCoder().decode(eventHandler.dataSchema, inner);
+
+      // Check if this event was already processed by checking a timestamp or unique identifier
+      // For now, we'll re-run the handler and let it handle duplicates
+      await eventHandler.handler(decodedData, {
+        eventTypeKey: eventHandler.eventHash,
+        eventData: log.data,
+        log,
+        isSync: true // Flag to indicate this is a sync operation
+      });
+
+      syncedCount++;
+    } catch (error) {
+      console.log(`[Sync ${eventHandler.eventName}] Could not process log:`, error);
+    }
+  }
+
+  return syncedCount;
+}
+
+// Scheduled poller to prevent future misses (runs every 10 minutes)
+// COMMENTED OUT: Risk of duplicating events when webhooks are working
+// TODO: Consider implementing targeted event recovery for specific blocks/transactions instead
+/*
+export const pollForMissedEvents = functions.pubsub
+  .schedule('every 10 minutes')
+  .onRun(async (context) => {
+    try {
+      console.log("[Scheduled Poll] Checking for missed events...");
+
+      // Poll for all registered event types
+      let totalPolled = 0;
+
+      for (const eventHandler of EVENT_HANDLERS) {
+        try {
+          console.log(`[Scheduled Poll] Checking ${eventHandler.eventName} events...`);
+          const polledCount = await syncEventType(eventHandler);
+          totalPolled += polledCount;
+
+          if (polledCount > 0) {
+            console.log(`[Scheduled Poll] Found and processed ${polledCount} ${eventHandler.eventName} events`);
+          }
+        } catch (error) {
+          console.error(`[Scheduled Poll] Error checking ${eventHandler.eventName}:`, error);
+        }
+      }
+
+      if (totalPolled > 0) {
+        console.log(`[Scheduled Poll] Total events processed: ${totalPolled}`);
+      } else {
+        console.log("[Scheduled Poll] No missed events found");
+      }
+    } catch (error) {
+      console.error("[Scheduled Poll] Error:", error);
+    }
+  });
+*/
+
