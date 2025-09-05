@@ -821,55 +821,54 @@ const EVENT_HANDLERS: EventHandler[] = [
   {
     eventName: "LEADERBOARD_POSITION_ADDED",
     eventHash: "0x3fd6b864fdc27cbf3befabeabb947dfb73d5a948368f78ca4a0a209e333cd5d5",
-    dataSchema: ["uint256", "address", "uint128", "uint8", "uint256[]", "uint256"], // speculationId, user, oddsPairId, positionType, leaderboardIds, amount
+    dataSchema: ["uint256", "address", "uint128", "uint256", "uint8", "uint256"], // speculationId, user, oddsPairId, amount, positionType, leaderboardId
+    // NOTE: One event is emitted per leaderboard registration, not one event with an array
+    // The Solidity function loops through leaderboardIds and emits a separate event for each one
     handler: async (decodedData, eventData) => {
-      const [speculationId, user, oddsPairId, positionType, leaderboardIds, amount] = decodedData;
+      const [speculationId, user, oddsPairId, amount, positionType, leaderboardId] = decodedData;
       console.log("LEADERBOARD_POSITION_ADDED:", { 
         speculationId: speculationId.toString(), 
         user: user.toLowerCase(),
         oddsPairId: oddsPairId.toString(),
+        amount: amount.toString(),
         positionType: positionType.toString(),
-        leaderboardIds: leaderboardIds.map((id: any) => id.toString()),
-        amount: amount.toString()
+        leaderboardId: leaderboardId.toString()
       });
 
       const positionTypeString = positionType.toString() === "0" ? "Upper" : "Lower";
       const userLower = user.toLowerCase();
       const timestamp = Timestamp.now();
+      const leaderboardIdStr = leaderboardId.toString();
 
       // 1. Create individual leaderboard position documents for efficient querying
       const amoyLeaderboardPositionsRef = db.collection("amoyLeaderboardPositionsv2.2");
       
-      for (const leaderboardId of leaderboardIds) {
-        const leaderboardIdStr = leaderboardId.toString();
-        
-        // Document ID: leaderboardId_speculationId_user_oddsPairId_positionType
-        const docId = `${leaderboardIdStr}_${speculationId.toString()}_${userLower}_${oddsPairId.toString()}_${positionType.toString()}`;
-        const leaderboardPositionDoc = amoyLeaderboardPositionsRef.doc(docId);
-        
-        // Check if already exists (handle duplicates)
-        const docSnapshot = await leaderboardPositionDoc.get();
-        
-        if (docSnapshot.exists) {
-          console.log(`Leaderboard position ${docId} already exists, updating amount.`);
-          await leaderboardPositionDoc.update({
-            amount: amount.toString(),
-            updatedAt: timestamp,
-          });
-        } else {
-          // Create new leaderboard position document
-          await leaderboardPositionDoc.set({
-            leaderboardId: leaderboardIdStr,
-            speculationId: speculationId.toString(),
-            user: userLower,
-            oddsPairId: oddsPairId.toString(),
-            positionType: positionType.toString(),
-            positionTypeString: positionTypeString,
-            amount: amount.toString(),
-            registeredAt: timestamp,
-          });
-          console.log(`Created leaderboard position ${docId} in amoyLeaderboardPositionsv2.2.`);
-        }
+      // Document ID: leaderboardId_speculationId_user_oddsPairId_positionType
+      const docId = `${leaderboardIdStr}_${speculationId.toString()}_${userLower}_${oddsPairId.toString()}_${positionType.toString()}`;
+      const leaderboardPositionDoc = amoyLeaderboardPositionsRef.doc(docId);
+      
+      // Check if already exists (handle duplicates)
+      const docSnapshot = await leaderboardPositionDoc.get();
+      
+      if (docSnapshot.exists) {
+        console.log(`Leaderboard position ${docId} already exists, updating amount.`);
+        await leaderboardPositionDoc.update({
+          amount: amount.toString(),
+          updatedAt: timestamp,
+        });
+      } else {
+        // Create new leaderboard position document
+        await leaderboardPositionDoc.set({
+          leaderboardId: leaderboardIdStr,
+          speculationId: speculationId.toString(),
+          user: userLower,
+          oddsPairId: oddsPairId.toString(),
+          positionType: positionType.toString(),
+          positionTypeString: positionTypeString,
+          amount: amount.toString(),
+          registeredAt: timestamp,
+        });
+        console.log(`Created leaderboard position ${docId} in amoyLeaderboardPositionsv2.2.`);
       }
 
       // 2. Update the main position document with leaderboard info for easy display
@@ -883,22 +882,18 @@ const EVENT_HANDLERS: EventHandler[] = [
         const currentLeaderboardIds = positionData?.leaderboardIds || [];
         const currentLeaderboardAmounts = positionData?.leaderboardAmounts || [];
         
-        // Merge new leaderboard registrations with existing ones
+        // Merge new leaderboard registration with existing ones
         const updatedLeaderboardIds = [...currentLeaderboardIds];
         const updatedLeaderboardAmounts = [...currentLeaderboardAmounts];
         
-        for (const leaderboardId of leaderboardIds) {
-          const leaderboardIdStr = leaderboardId.toString();
-          const existingIndex = updatedLeaderboardIds.indexOf(leaderboardIdStr);
-          
-          if (existingIndex >= 0) {
-            // Update existing amount
-            updatedLeaderboardAmounts[existingIndex] = amount.toString();
-          } else {
-            // Add new leaderboard registration
-            updatedLeaderboardIds.push(leaderboardIdStr);
-            updatedLeaderboardAmounts.push(amount.toString());
-          }
+        const existingIndex = updatedLeaderboardIds.indexOf(leaderboardIdStr);
+        if (existingIndex >= 0) {
+          // Update existing amount
+          updatedLeaderboardAmounts[existingIndex] = amount.toString();
+        } else {
+          // Add new leaderboard registration
+          updatedLeaderboardIds.push(leaderboardIdStr);
+          updatedLeaderboardAmounts.push(amount.toString());
         }
         
         await positionDoc.update({
@@ -907,7 +902,6 @@ const EVENT_HANDLERS: EventHandler[] = [
           lastLeaderboardRegistration: timestamp,
           updatedAt: timestamp,
         });
-        
         console.log(`Updated position ${positionDocId} with leaderboard registrations:`, {
           leaderboardIds: updatedLeaderboardIds,
           amounts: updatedLeaderboardAmounts
@@ -918,28 +912,24 @@ const EVENT_HANDLERS: EventHandler[] = [
 
       // 3. Update leaderboard documents with participation stats
       const amoyLeaderboardsRef = db.collection("amoyLeaderboardsv2.2");
+      const leaderboardDoc = amoyLeaderboardsRef.doc(leaderboardIdStr);
       
-      for (const leaderboardId of leaderboardIds) {
-        const leaderboardIdStr = leaderboardId.toString();
-        const leaderboardDoc = amoyLeaderboardsRef.doc(leaderboardIdStr);
-        
-        try {
-          // Increment total positions count and update last activity
-          await leaderboardDoc.update({
-            totalPositions: FieldValue.increment(1),
-            lastPositionAdded: timestamp,
-            updatedAt: timestamp,
-          });
-          console.log(`Updated leaderboard ${leaderboardIdStr} position count.`);
-        } catch (error) {
-          // If leaderboard doesn't exist or field doesn't exist, initialize it
-          await leaderboardDoc.set({
-            totalPositions: 1,
-            lastPositionAdded: timestamp,
-            updatedAt: timestamp,
-          }, { merge: true });
-          console.log(`Initialized position count for leaderboard ${leaderboardIdStr}.`);
-        }
+      try {
+        // Increment total positions count and update last activity
+        await leaderboardDoc.update({
+          totalPositions: FieldValue.increment(1),
+          lastPositionAdded: timestamp,
+          updatedAt: timestamp,
+        });
+        console.log(`Updated leaderboard ${leaderboardIdStr} position count.`);
+      } catch (error) {
+        // If leaderboard doesn't exist or field doesn't exist, initialize it
+        await leaderboardDoc.set({
+          totalPositions: 1,
+          lastPositionAdded: timestamp,
+          updatedAt: timestamp,
+        }, { merge: true });
+        console.log(`Initialized position count for leaderboard ${leaderboardIdStr}.`);
       }
     }
   }
