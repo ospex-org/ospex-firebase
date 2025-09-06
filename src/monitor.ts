@@ -317,8 +317,8 @@ const sportsConfig = {
   NFL: {
     preseasonStart: '2025-08-01',
     preseasonEnd: '2025-08-23',
-    seasonStart: '2024-12-31', // TBD
-    seasonEnd: '2024-12-31', // TBD
+    seasonStart: '2025-09-04',
+    seasonEnd: '2026-01-07',
     postseasonStart: '2024-12-31', // TBD
     postseasonEnd: '2025-02-10', // TBD
     daysAheadPreseason: 3,
