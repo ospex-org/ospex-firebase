@@ -957,11 +957,51 @@ export const insightWebhook = functions.https.onRequest(async (req, res) => {
     console.log("[Webhook received]", new Date().toISOString(), JSON.stringify(req.body, null, 2));
 
     // Handle different webhook formats
-    let log;
     if (req.body.data && req.body.data[0] && req.body.data[0].data) {
       // Thirdweb format
-      log = req.body.data[0].data;
+      const log = req.body.data[0].data;
       console.log("[Thirdweb format detected]");
+      
+      // CoreEventEmitted event signature hash
+      const COREEVENTEMITTED_TOPIC = "0x05a981d03316d55f7ca9ffff0cd10dda8e9ceeea936b6fc212d46cf3f8a73364";
+
+      // Only process logs that match the CoreEventEmitted event
+      if (log.topics[0] !== COREEVENTEMITTED_TOPIC) {
+        console.log("Ignoring non-CoreEventEmitted event:", log.topics[0]);
+        res.status(200).send("Ignored non-CoreEventEmitted event");
+        return;
+      }
+
+      const eventTypeKey = log.topics[1];
+      const eventData = log.data;
+
+      // Find handler for this event
+      const eventHandler = getEventHandler(eventTypeKey);
+      const eventType = eventHandler?.eventName || eventTypeKey;
+
+      // Log eventType, eventTypeKey, and eventData with timestamp
+      console.log(`[Event received] ${new Date().toISOString()} eventType:`, eventType, "eventTypeKey:", eventTypeKey, "eventData:", eventData);
+
+      // Process event using registered handler
+      if (eventHandler) {
+        try {
+          // Decode the event data
+          const [inner] = AbiCoder.defaultAbiCoder().decode(["bytes"], eventData);
+          const decodedData = AbiCoder.defaultAbiCoder().decode(eventHandler.dataSchema, inner);
+
+          // Call the event handler
+          await eventHandler.handler(decodedData, { eventTypeKey, eventData, log });
+
+          console.log(`[Event processed] Successfully processed ${eventType}`);
+        } catch (error) {
+          console.error(`[Event error] Failed to process ${eventType}:`, error);
+        }
+      } else {
+        console.log(`[Event ignored] No handler registered for eventType: ${eventType} (${eventTypeKey})`);
+      }
+      
+      res.status(200).send("ok");
+      return;
     } else if (req.body.event && req.body.event.data && req.body.event.data.block && req.body.event.data.block.logs) {
       // Alchemy format - check if there are any logs
       const alchemyLogs = req.body.event.data.block.logs;
@@ -970,54 +1010,57 @@ export const insightWebhook = functions.https.onRequest(async (req, res) => {
         res.status(200).send("No events in block");
         return;
       }
-      // Process first log for now
-      log = alchemyLogs[0];
-      console.log("[Alchemy format detected]");
+      console.log(`[Alchemy format detected] Processing ${alchemyLogs.length} events`);
+      
+      // Process ALL logs in the transaction
+      for (let i = 0; i < alchemyLogs.length; i++) {
+        const log = alchemyLogs[i];
+        
+        // CoreEventEmitted event signature hash
+        const COREEVENTEMITTED_TOPIC = "0x05a981d03316d55f7ca9ffff0cd10dda8e9ceeea936b6fc212d46cf3f8a73364";
+
+        // Only process logs that match the CoreEventEmitted event
+        if (log.topics[0] !== COREEVENTEMITTED_TOPIC) {
+          console.log(`[Event ${i}] Ignoring non-CoreEventEmitted event:`, log.topics[0]);
+          continue;
+        }
+
+        const eventTypeKey = log.topics[1];
+        const eventData = log.data;
+
+        // Find handler for this event
+        const eventHandler = getEventHandler(eventTypeKey);
+        const eventType = eventHandler?.eventName || eventTypeKey;
+
+        // Log eventType, eventTypeKey, and eventData with timestamp
+        console.log(`[Event ${i} received] ${new Date().toISOString()} eventType:`, eventType, "eventTypeKey:", eventTypeKey, "eventData:", eventData);
+
+        // Process event using registered handler
+        if (eventHandler) {
+          try {
+            // Decode the event data
+            const [inner] = AbiCoder.defaultAbiCoder().decode(["bytes"], eventData);
+            const decodedData = AbiCoder.defaultAbiCoder().decode(eventHandler.dataSchema, inner);
+
+            // Call the event handler
+            await eventHandler.handler(decodedData, { eventTypeKey, eventData, log });
+
+            console.log(`[Event ${i} processed] Successfully processed ${eventType}`);
+          } catch (error) {
+            console.error(`[Event ${i} error] Failed to process ${eventType}:`, error);
+          }
+        } else {
+          console.log(`[Event ${i} ignored] No handler registered for eventType: ${eventType} (${eventTypeKey})`);
+        }
+      }
+      
+      res.status(200).send("ok");
+      return;
     } else {
       console.log("[Unknown webhook format, ignoring]");
       res.status(200).send("Unknown format");
       return;
     }
-
-    // CoreEventEmitted event signature hash
-    const COREEVENTEMITTED_TOPIC = "0x05a981d03316d55f7ca9ffff0cd10dda8e9ceeea936b6fc212d46cf3f8a73364";
-
-    // Only process logs that match the CoreEventEmitted event
-    if (log.topics[0] !== COREEVENTEMITTED_TOPIC) {
-      console.log("Ignoring non-CoreEventEmitted event:", log.topics[0]);
-      res.status(200).send("Ignored non-CoreEventEmitted event");
-      return;
-    }
-
-    const eventTypeKey = log.topics[1];
-    const eventData = log.data;
-
-    // Find handler for this event
-    const eventHandler = getEventHandler(eventTypeKey);
-    const eventType = eventHandler?.eventName || eventTypeKey;
-
-    // Log eventType, eventTypeKey, and eventData with timestamp
-    console.log(`[Event received] ${new Date().toISOString()} eventType:`, eventType, "eventTypeKey:", eventTypeKey, "eventData:", eventData);
-
-    // Process event using registered handler
-    if (eventHandler) {
-      try {
-        // Decode the event data
-        const [inner] = AbiCoder.defaultAbiCoder().decode(["bytes"], eventData);
-        const decodedData = AbiCoder.defaultAbiCoder().decode(eventHandler.dataSchema, inner);
-
-        // Call the event handler
-        await eventHandler.handler(decodedData, { eventTypeKey, eventData, log });
-
-        console.log(`[Event processed] Successfully processed ${eventType}`);
-      } catch (error) {
-        console.error(`[Event error] Failed to process ${eventType}:`, error);
-      }
-    } else {
-      console.log(`[Event ignored] No handler registered for eventType: ${eventType} (${eventTypeKey})`);
-    }
-
-    res.status(200).send("ok");
   } catch (err) {
     console.error("Webhook error:", err);
     res.status(500).send("Internal Server Error");
