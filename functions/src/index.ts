@@ -263,16 +263,18 @@ const EVENT_HANDLERS: EventHandler[] = [
   {
     eventName: "POSITION_CREATED",
     eventHash: "0x8516611167c28bf928ba43c90eb7238b770f757c1131cb049dfe84f96c9f9ca4",
-    dataSchema: ["uint256", "address", "uint128", "uint32", "uint8", "uint256"],
+    dataSchema: ["uint256", "address", "uint128", "uint32", "uint8", "uint256", "uint64", "uint64"],
     handler: async (decodedData, eventData) => {
-      const [speculationId, user, oddsPairId, unmatchedExpiry, positionType, amount] = decodedData;
+      const [speculationId, user, oddsPairId, unmatchedExpiry, positionType, amount, upperOdds, lowerOdds] = decodedData;
       console.log("POSITION_CREATED:", { 
         speculationId: speculationId.toString(), 
         user: user.toLowerCase(),
         oddsPairId: oddsPairId.toString(),
         unmatchedExpiry: unmatchedExpiry.toString(),
         positionType: positionType.toString(),
-        amount: amount.toString()
+        amount: amount.toString(),
+        upperOdds: upperOdds.toString(),
+        lowerOdds: lowerOdds.toString()
       });
 
       // Store position in amoyPositionsv2.3 collection
@@ -292,6 +294,8 @@ const EVENT_HANDLERS: EventHandler[] = [
           unmatchedAmount: amount.toString(), // Initially all unmatched
           matchedAmount: "0",
           unmatchedExpiry: unmatchedExpiry.toString(),
+          upperOdds: upperOdds.toString(),
+          lowerOdds: lowerOdds.toString(),
           updatedAt: Timestamp.now(),
         });
         console.log(`Updated position ${docId} in amoyPositionsv2.3.`);
@@ -308,6 +312,8 @@ const EVENT_HANDLERS: EventHandler[] = [
           matchedAmount: "0",
           unmatchedAmount: amount.toString(),
           unmatchedExpiry: unmatchedExpiry.toString(),
+          upperOdds: upperOdds.toString(),
+          lowerOdds: lowerOdds.toString(),
           claimed: false,
           createdAt: Timestamp.now(),
         });
@@ -348,72 +354,45 @@ const EVENT_HANDLERS: EventHandler[] = [
         return;
       }
       
-      // Calculate exact odds from oddsPairId using the same logic as the smart contract
+      // Simple approach: Use stored odds from position creation (matches smart contract exactly)
       const ODDS_PRECISION = 10_000_000; // 1e7
-      const ODDS_INCREMENT = 100_000; // 0.01
-      const MIN_ODDS = 10_100_000; // 1.01
       
-      // Determine if this is Upper or Lower position and calculate base odds
-      const oddsPairIdNum = parseInt(oddsPairId.toString());
-      const isLowerPosition = oddsPairIdNum >= 10000;
-      const baseOddsPairId = isLowerPosition ? oddsPairIdNum - 10000 : oddsPairIdNum;
-      
-      // Calculate the smaller odds (the one used to generate the oddsPairId)
-      const smallerOdds = (baseOddsPairId * ODDS_INCREMENT) + MIN_ODDS;
-      
-      // Calculate inverse odds
-      const numerator = ODDS_PRECISION * ODDS_PRECISION;
-      const denominator = smallerOdds - ODDS_PRECISION;
-      const exactInverse = Math.floor(numerator / denominator) + ODDS_PRECISION;
-      
-      // Determine upperOdds and lowerOdds (following Solidity logic)
-      let upperOdds: number;
-      let lowerOdds: number;
-      
-      // For oddsPairId >= 10000 (Lower position created the pair)
-      if (isLowerPosition) {
-        // Lower position was created with smallerOdds (the favorite), so:
-        // Upper (dog) gets the inverse (higher) odds
-        // Lower (favorite) gets the smaller odds
-        upperOdds = exactInverse;
-        lowerOdds = smallerOdds;
-      } else {
-        // Upper position was created with smallerOdds (the favorite), so:
-        // Upper (favorite) gets the smaller odds
-        // Lower (dog) gets the inverse (higher) odds
-        upperOdds = smallerOdds;
-        lowerOdds = exactInverse;
-      }
+      // Get stored upperOdds and lowerOdds from the maker's position
+      const upperOdds = parseInt(makerData.upperOdds);
+      const lowerOdds = parseInt(makerData.lowerOdds);
       
       // Calculate maker amount consumed using exact contract logic (matches Solidity)
+      // From PositionModule.sol line 792-797:
+      // uint256 makerAmountConsumed = (amount * (
+      //     makerPos.positionType == PositionType.Upper
+      //         ? oddsPair.lowerOdds - ODDS_PRECISION
+      //         : oddsPair.upperOdds - ODDS_PRECISION
+      // )) / ODDS_PRECISION;
       const makerPositionTypeNum = parseInt(makerPositionType.toString());
-      // Use opposite odds: Upper maker uses lowerOdds, Lower maker uses upperOdds
-      const oppositeOdds = makerPositionTypeNum === 0 ? lowerOdds : upperOdds;
-      const makerAmountConsumed = Math.floor((parseInt(amount.toString()) * (oppositeOdds - ODDS_PRECISION)) / ODDS_PRECISION);
+      const relevantOdds = makerPositionTypeNum === 0 ? lowerOdds : upperOdds; // Upper uses lowerOdds, Lower uses upperOdds
+      const makerAmountConsumed = Math.floor((parseInt(amount.toString()) * (relevantOdds - ODDS_PRECISION)) / ODDS_PRECISION);
       
-      console.log(`🔍 ENHANCED ODDS CALCULATION DEBUG for oddsPairId=${oddsPairId}:`, {
+      console.log(`🔍 SIMPLE CONTRACT-MATCHING CALCULATION for oddsPairId=${oddsPairId}:`, {
         // Input values
         oddsPairId: oddsPairId.toString(),
         takerAmount: amount.toString(),
+        takerAmountUSDC: parseInt(amount.toString()) / 1000000,
         makerPositionType: makerPositionType.toString(),
         maker: maker.toLowerCase(),
         taker: taker.toLowerCase(),
-        // Calculation steps
-        isLowerPosition,
-        baseOddsPairId,
-        smallerOdds,
-        exactInverse,
+        // Stored odds (from position creation)
         upperOdds,
         lowerOdds,
-        oppositeOdds,
+        upperOddsDecimal: upperOdds / ODDS_PRECISION,
+        lowerOddsDecimal: lowerOdds / ODDS_PRECISION,
+        // Calculation
+        relevantOdds,
+        relevantOddsDecimal: relevantOdds / ODDS_PRECISION,
         // Final results
         makerAmountConsumed,
         makerAmountConsumedUSDC: makerAmountConsumed / 1000000,
-        takerAmountUSDC: parseInt(amount.toString()) / 1000000,
-        // Verification calculations
-        expectedRatio: oppositeOdds / ODDS_PRECISION,
-        calculationFormula: `${amount.toString()} * (${oppositeOdds} - ${ODDS_PRECISION}) / ${ODDS_PRECISION}`,
-        rawCalculation: (parseInt(amount.toString()) * (oppositeOdds - ODDS_PRECISION)) / ODDS_PRECISION
+        // Contract formula verification
+        contractFormula: `${amount.toString()} * (${relevantOdds} - ${ODDS_PRECISION}) / ${ODDS_PRECISION} = ${makerAmountConsumed}`
       });
       
       // Update maker's position
