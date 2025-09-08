@@ -269,9 +269,9 @@ const sportsConfig = {
     seasonEnd: '2025-10-31',
     postseasonStart: '2024-11-01',
     postseasonEnd: '2024-12-15',
-    daysAheadPreseason: 14,
-    daysAheadRegular: 5,
-    daysAheadPostseason: 14,
+    daysAheadPreseason: 2,
+    daysAheadRegular: 2,
+    daysAheadPostseason: 2,
     jsonoddsId: 0,
     rundownId: 3
   },
@@ -282,9 +282,9 @@ const sportsConfig = {
     seasonEnd: '2025-04-21',
     postseasonStart: '2025-01-01', // TBD
     postseasonEnd: '2025-01-01', // TBD
-    daysAheadPreseason: 10,
-    daysAheadRegular: 3,
-    daysAheadPostseason: 7,
+    daysAheadPreseason: 1,
+    daysAheadRegular: 2,
+    daysAheadPostseason: 3,
     jsonoddsId: 1,
     rundownId: 4
   },
@@ -308,8 +308,8 @@ const sportsConfig = {
     seasonEnd: '2025-12-13',
     postseasonStart: '2024-12-31', // TBD
     postseasonEnd: '2024-12-31', // TBD
-    daysAheadPreseason: 21,
-    daysAheadRegular: 8,
+    daysAheadPreseason: 1,
+    daysAheadRegular: 3,
     daysAheadPostseason: 3,
     jsonoddsId: 3,
     rundownId: 1
@@ -322,7 +322,7 @@ const sportsConfig = {
     postseasonStart: '2024-12-31', // TBD
     postseasonEnd: '2025-02-10', // TBD
     daysAheadPreseason: 3,
-    daysAheadRegular: 8,
+    daysAheadRegular: 3,
     daysAheadPostseason: 3,
     jsonoddsId: 4,
     rundownId: 2
