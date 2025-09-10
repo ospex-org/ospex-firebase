@@ -483,6 +483,9 @@ const EVENT_HANDLERS: EventHandler[] = [
           matchedAmount: newTakerMatchedAmount,
           counterparties: newTakerCounterparties,
           counterpartyAmounts: newTakerCounterpartyAmounts,
+          // Copy odds from maker position (these are the same for both sides of the match)
+          upperOdds: upperOdds.toString(),
+          lowerOdds: lowerOdds.toString(),
           updatedAt: Timestamp.now(),
         });
         
@@ -491,6 +494,9 @@ const EVENT_HANDLERS: EventHandler[] = [
           newTakerMatchedAmount,
           takerAmountAdded: amount.toString(),
           makerAmountConsumed,
+          // Added odds from maker position
+          upperOdds: upperOdds.toString(),
+          lowerOdds: lowerOdds.toString(),
           newTakerCounterparties,
           newTakerCounterpartyAmounts,
           totalTakerCounterpartySum: newTakerCounterpartyAmounts.reduce((sum, amt) => sum + parseInt(amt), 0)
@@ -507,6 +513,9 @@ const EVENT_HANDLERS: EventHandler[] = [
           unmatchedAmount: "0",
           unmatchedExpiry: "0",
           claimed: false,
+          // Copy odds from maker position (these are the same for both sides of the match)
+          upperOdds: upperOdds.toString(),
+          lowerOdds: lowerOdds.toString(),
           counterparties: [maker.toLowerCase()],
           counterpartyAmounts: [makerAmountConsumed.toString()], // What the maker put up (consumed)
           createdAt: Timestamp.now(),
@@ -517,6 +526,9 @@ const EVENT_HANDLERS: EventHandler[] = [
           makerAmountConsumed,
           positionType: takerPositionType,
           positionTypeString: takerPositionTypeString,
+          // Added odds from maker position
+          upperOdds: upperOdds.toString(),
+          lowerOdds: lowerOdds.toString(),
           counterparties: [maker.toLowerCase()],
           counterpartyAmounts: [makerAmountConsumed.toString()]
         });
