@@ -754,24 +754,49 @@ const EVENT_HANDLERS: EventHandler[] = [
         });
         console.log(`Created registration ${docId} in amoyLeaderboardRegistrationsv2.3.`);
 
-        // Increment participant count in leaderboard document
+        // Update leaderboard: increment participant count and add entry fee to prize pool
         const amoyLeaderboardsRef = db.collection("amoyLeaderboardsv2.3");
         const leaderboardDoc = amoyLeaderboardsRef.doc(leaderboardId.toString());
         
         try {
-          await leaderboardDoc.update({
-            currentParticipants: FieldValue.increment(1),
-            updatedAt: Timestamp.now(),
+          await db.runTransaction(async (transaction) => {
+            const leaderboardSnapshot = await transaction.get(leaderboardDoc);
+            
+            if (!leaderboardSnapshot.exists) {
+              // Create new leaderboard document
+              transaction.set(leaderboardDoc, {
+                currentParticipants: 1,
+                prizePool: "0", // Will be set correctly by future events
+                updatedAt: Timestamp.now(),
+              }, { merge: true });
+              console.log(`Initialized leaderboard ${leaderboardId.toString()} with participant count 1.`);
+              return;
+            }
+            
+            const leaderboardData = leaderboardSnapshot.data();
+            const currentPrizePool = BigInt(leaderboardData?.prizePool || '0');
+            const entryFee = BigInt(leaderboardData?.entryFee || '0');
+            const currentParticipants = leaderboardData?.currentParticipants || 0;
+            
+            const updateData: any = {
+              currentParticipants: currentParticipants + 1,
+              updatedAt: Timestamp.now(),
+            };
+            
+            // Add entry fee to prize pool if there is one
+            if (entryFee > 0) {
+              const newPrizePool = currentPrizePool + entryFee;
+              updateData.prizePool = newPrizePool.toString();
+              
+              console.log(`💰 PRIZE POOL UPDATED: Leaderboard ${leaderboardId.toString()} - Entry fee ${entryFee.toString()} added. Prize pool: ${currentPrizePool.toString()} → ${newPrizePool.toString()}, Participants: ${currentParticipants} → ${currentParticipants + 1}`);
+            } else {
+              console.log(`👥 PARTICIPANTS UPDATED: Leaderboard ${leaderboardId.toString()} participants: ${currentParticipants} → ${currentParticipants + 1} (no entry fee)`);
+            }
+            
+            transaction.update(leaderboardDoc, updateData);
           });
-          console.log(`Incremented currentParticipants count for leaderboard ${leaderboardId.toString()}.`);
         } catch (error) {
-          console.error(`Error updating participant count for leaderboard ${leaderboardId.toString()}:`, error);
-          // If leaderboard doesn't exist, create it with participant count of 1
-          await leaderboardDoc.set({
-            currentParticipants: 1,
-            updatedAt: Timestamp.now(),
-          }, { merge: true });
-          console.log(`Initialized currentParticipants to 1 for leaderboard ${leaderboardId.toString()}.`);
+          console.error(`❌ Error updating leaderboard ${leaderboardId.toString()}:`, error);
         }
       }
     }
@@ -921,6 +946,113 @@ const EVENT_HANDLERS: EventHandler[] = [
           updatedAt: timestamp,
         }, { merge: true });
         console.log(`Initialized position count for leaderboard ${leaderboardIdStr}.`);
+      }
+    }
+  },
+  {
+    eventName: "LEADERBOARD_POSITION_UPDATED",
+    eventHash: "0xa26bc489af22fa38567ea7e5fae4e5b57aceafbe47379efea50ad48dcedbe90b",
+    dataSchema: ["uint256", "address", "uint128", "uint256", "uint8", "uint256"], // speculationId, user, oddsPairId, amount, positionType, leaderboardId
+    handler: async (decodedData, eventData) => {
+      const [speculationId, user, oddsPairId, amount, positionType, leaderboardId] = decodedData;
+      console.log("LEADERBOARD_POSITION_UPDATED:", { 
+        speculationId: speculationId.toString(), 
+        user: user.toLowerCase(),
+        oddsPairId: oddsPairId.toString(),
+        amount: amount.toString(),
+        positionType: positionType.toString(),
+        leaderboardId: leaderboardId.toString()
+      });
+
+      const positionTypeString = positionType.toString() === "0" ? "Upper" : "Lower";
+      const userLower = user.toLowerCase();
+      const timestamp = Timestamp.now();
+      const leaderboardIdStr = leaderboardId.toString();
+
+      // 1. Update the leaderboard position document with new amount
+      const amoyLeaderboardPositionsRef = db.collection("amoyLeaderboardPositionsv2.3");
+      
+      // Document ID: leaderboardId_speculationId_user_oddsPairId_positionType
+      const docId = `${leaderboardIdStr}_${speculationId.toString()}_${userLower}_${oddsPairId.toString()}_${positionType.toString()}`;
+      const leaderboardPositionDoc = amoyLeaderboardPositionsRef.doc(docId);
+      
+      // Check if position exists
+      const docSnapshot = await leaderboardPositionDoc.get();
+      
+      if (docSnapshot.exists) {
+        const previousData = docSnapshot.data();
+        const previousAmount = previousData?.amount || "0";
+        
+        console.log(`Updating leaderboard position ${docId} - Previous amount: ${previousAmount}, New amount: ${amount.toString()}`);
+        
+        await leaderboardPositionDoc.update({
+          amount: amount.toString(),
+          updatedAt: timestamp,
+        });
+        
+        console.log(`✅ Updated leaderboard position ${docId} amount: ${previousAmount} → ${amount.toString()}`);
+      } else {
+        // Position doesn't exist - this shouldn't happen for an UPDATE event
+        console.error(`❌ Leaderboard position ${docId} not found for UPDATE event. This shouldn't happen.`);
+        
+        // Create it anyway to handle edge cases
+        await leaderboardPositionDoc.set({
+          leaderboardId: leaderboardIdStr,
+          speculationId: speculationId.toString(),
+          user: userLower,
+          oddsPairId: oddsPairId.toString(),
+          positionType: positionType.toString(),
+          positionTypeString: positionTypeString,
+          amount: amount.toString(),
+          registeredAt: timestamp,
+        });
+        console.log(`🔧 Created missing leaderboard position ${docId} with amount ${amount.toString()}`);
+      }
+
+      // 2. Update the main position document with updated leaderboard amount
+      const amoyPositionsRef = db.collection("amoyPositionsv2.3");
+      const positionDocId = `${speculationId.toString()}_${userLower}_${oddsPairId.toString()}_${positionType.toString()}`;
+      const positionDoc = amoyPositionsRef.doc(positionDocId);
+      const positionSnapshot = await positionDoc.get();
+      
+      if (positionSnapshot.exists) {
+        const positionData = positionSnapshot.data();
+        const currentLeaderboardIds = positionData?.leaderboardIds || [];
+        const currentLeaderboardAmounts = positionData?.leaderboardAmounts || [];
+        
+        // Find and update the specific leaderboard amount
+        const leaderboardIndex = currentLeaderboardIds.indexOf(leaderboardIdStr);
+        if (leaderboardIndex >= 0) {
+          const updatedLeaderboardAmounts = [...currentLeaderboardAmounts];
+          const previousAmount = updatedLeaderboardAmounts[leaderboardIndex];
+          updatedLeaderboardAmounts[leaderboardIndex] = amount.toString();
+          
+          await positionDoc.update({
+            leaderboardAmounts: updatedLeaderboardAmounts,
+            lastLeaderboardUpdate: timestamp,
+            updatedAt: timestamp,
+          });
+          
+          console.log(`✅ Updated position ${positionDocId} leaderboard amount for leaderboard ${leaderboardIdStr}: ${previousAmount} → ${amount.toString()}`);
+        } else {
+          console.log(`⚠️ Leaderboard ${leaderboardIdStr} not found in position ${positionDocId} leaderboard registrations. This may be normal for increase-only operations.`);
+        }
+      } else {
+        console.log(`⚠️ Position ${positionDocId} not found in amoyPositionsv2.3 for leaderboard update.`);
+      }
+
+      // 3. Update leaderboard last activity
+      const amoyLeaderboardsRef = db.collection("amoyLeaderboardsv2.3");
+      const leaderboardDoc = amoyLeaderboardsRef.doc(leaderboardIdStr);
+      
+      try {
+        await leaderboardDoc.update({
+          lastPositionUpdate: timestamp,
+          updatedAt: timestamp,
+        });
+        console.log(`✅ Updated leaderboard ${leaderboardIdStr} last activity timestamp.`);
+      } catch (error) {
+        console.log(`⚠️ Could not update leaderboard ${leaderboardIdStr} last activity:`, error);
       }
     }
   }
