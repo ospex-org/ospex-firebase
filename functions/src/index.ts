@@ -1055,6 +1055,148 @@ const EVENT_HANDLERS: EventHandler[] = [
         console.log(`⚠️ Could not update leaderboard ${leaderboardIdStr} last activity:`, error);
       }
     }
+  },
+
+  // ROI SUBMISSION: Update user registration with submitted ROI
+  {
+    eventName: "LEADERBOARD_ROI_SUBMITTED",
+    eventHash: "0x5f08ddffa691e7e0bbfc0d4041c1a115aad79442afe2b8e92141e23d19786c48",
+    dataSchema: ["uint256", "address", "int256"], // leaderboardId, user, roi
+    handler: async (decodedData, eventData) => {
+      const [leaderboardId, user, roi] = decodedData;
+      console.log("LEADERBOARD_ROI_SUBMITTED:", { 
+        leaderboardId: leaderboardId.toString(), 
+        user: user.toLowerCase(),
+        roi: roi.toString()
+      });
+
+      const leaderboardIdStr = leaderboardId.toString();
+      const userLower = user.toLowerCase();
+      const timestamp = Timestamp.now();
+
+      // Update user registration with submitted ROI
+      const amoyLeaderboardRegistrationsRef = db.collection("amoyLeaderboardRegistrationsv2.3");
+      const docId = `${leaderboardIdStr}_${userLower}`;
+      const userRegistrationDoc = amoyLeaderboardRegistrationsRef.doc(docId);
+
+      try {
+        const docSnapshot = await userRegistrationDoc.get();
+        
+        if (docSnapshot.exists) {
+          await userRegistrationDoc.update({
+            submittedROI: roi.toString(),
+            roiSubmittedAt: timestamp,
+            updatedAt: timestamp,
+          });
+          
+          console.log(`✅ Updated user ${userLower} registration in leaderboard ${leaderboardIdStr} with ROI: ${roi.toString()}`);
+        } else {
+          console.error(`❌ User registration ${docId} not found for ROI submission`);
+        }
+      } catch (error) {
+        console.error(`❌ Error updating ROI submission for ${docId}:`, error);
+      }
+
+      // Also update leaderboard last activity
+      const amoyLeaderboardsRef = db.collection("amoyLeaderboardsv2.3");
+      const leaderboardDoc = amoyLeaderboardsRef.doc(leaderboardIdStr);
+      
+      try {
+        await leaderboardDoc.update({
+          lastROISubmission: timestamp,
+          updatedAt: timestamp,
+        });
+        console.log(`✅ Updated leaderboard ${leaderboardIdStr} last ROI submission timestamp`);
+      } catch (error) {
+        console.log(`⚠️ Could not update leaderboard ${leaderboardIdStr} last activity:`, error);
+      }
+    }
+  },
+
+  // NEW HIGHEST ROI: Mark user as current winner
+  {
+    eventName: "LEADERBOARD_NEW_HIGHEST_ROI",
+    eventHash: "0x08a3d394345468c1472ca0110a947e0f1c6ad1063a9e29633025bc0522ce5b0a",
+    dataSchema: ["uint256", "int256", "address"], // leaderboardId, newHighestROI, winner
+    handler: async (decodedData, eventData) => {
+      const [leaderboardId, newHighestROI, winner] = decodedData;
+      console.log("LEADERBOARD_NEW_HIGHEST_ROI:", { 
+        leaderboardId: leaderboardId.toString(), 
+        newHighestROI: newHighestROI.toString(),
+        winner: winner.toLowerCase()
+      });
+
+      const leaderboardIdStr = leaderboardId.toString();
+      const winnerLower = winner.toLowerCase();
+      const timestamp = Timestamp.now();
+
+      // Update winner's registration
+      const amoyLeaderboardRegistrationsRef = db.collection("amoyLeaderboardRegistrationsv2.3");
+      const winnerDocId = `${leaderboardIdStr}_${winnerLower}`;
+      const winnerRegistrationDoc = amoyLeaderboardRegistrationsRef.doc(winnerDocId);
+
+      try {
+        const docSnapshot = await winnerRegistrationDoc.get();
+        
+        if (docSnapshot.exists) {
+          await winnerRegistrationDoc.update({
+            isCurrentWinner: true,
+            highestROIAt: timestamp,
+            updatedAt: timestamp,
+          });
+          
+          console.log(`✅ Updated user ${winnerLower} as current winner in leaderboard ${leaderboardIdStr}`);
+        } else {
+          console.error(`❌ Winner registration ${winnerDocId} not found for highest ROI update`);
+        }
+      } catch (error) {
+        console.error(`❌ Error updating highest ROI winner for ${winnerDocId}:`, error);
+      }
+
+      // Clear previous winners (set isCurrentWinner = false for others)
+      try {
+        const registrationsSnapshot = await amoyLeaderboardRegistrationsRef
+          .where("leaderboardId", "==", leaderboardIdStr)
+          .where("isCurrentWinner", "==", true)
+          .get();
+
+        const batch = db.batch();
+        let hasUpdates = false;
+        
+        registrationsSnapshot.docs.forEach(doc => {
+          if (doc.id !== winnerDocId) {
+            batch.update(doc.ref, { 
+              isCurrentWinner: false,
+              updatedAt: timestamp
+            });
+            hasUpdates = true;
+          }
+        });
+        
+        if (hasUpdates) {
+          await batch.commit();
+          console.log(`✅ Cleared previous winners for leaderboard ${leaderboardIdStr}`);
+        }
+      } catch (error) {
+        console.log(`⚠️ Could not clear previous winners for leaderboard ${leaderboardIdStr}:`, error);
+      }
+
+      // Update leaderboard with new highest ROI and current winner
+      const amoyLeaderboardsRef = db.collection("amoyLeaderboardsv2.3");
+      const leaderboardDoc = amoyLeaderboardsRef.doc(leaderboardIdStr);
+      
+      try {
+        await leaderboardDoc.update({
+          currentHighestROI: newHighestROI.toString(),
+          currentWinner: winnerLower,
+          lastHighestROIUpdate: timestamp,
+          updatedAt: timestamp,
+        });
+        console.log(`✅ Updated leaderboard ${leaderboardIdStr} with new highest ROI: ${newHighestROI.toString()}, winner: ${winnerLower}`);
+      } catch (error) {
+        console.log(`⚠️ Could not update leaderboard ${leaderboardIdStr} highest ROI data:`, error);
+      }
+    }
   }
   // Add new event handlers here as they're implemented
 ];
