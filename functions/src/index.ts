@@ -1197,6 +1197,97 @@ const EVENT_HANDLERS: EventHandler[] = [
         console.log(`⚠️ Could not update leaderboard ${leaderboardIdStr} highest ROI data:`, error);
       }
     }
+  },
+
+  // PRIZE CLAIMED: Mark user as having claimed their prize and update leaderboard
+  {
+    eventName: "LEADERBOARD_PRIZE_CLAIMED",
+    eventHash: "0xfb98d33284e6cbc5b1bc64e7e67b044c89173544ca95cad754fc28ec3ea40945",
+    dataSchema: ["uint256", "address", "uint256"], // leaderboardId, user, share
+    handler: async (decodedData, eventData) => {
+      const [leaderboardId, user, share] = decodedData;
+      console.log("LEADERBOARD_PRIZE_CLAIMED:", { 
+        leaderboardId: leaderboardId.toString(), 
+        user: user.toLowerCase(),
+        share: share.toString()
+      });
+
+      const leaderboardIdStr = leaderboardId.toString();
+      const userLower = user.toLowerCase();
+      const timestamp = Timestamp.now();
+      const shareAmount = share.toString();
+
+      // Update user registration with prize claim info
+      const amoyLeaderboardRegistrationsRef = db.collection("amoyLeaderboardRegistrationsv2.3");
+      const userDocId = `${leaderboardIdStr}_${userLower}`;
+      const userRegistrationDoc = amoyLeaderboardRegistrationsRef.doc(userDocId);
+
+      try {
+        const docSnapshot = await userRegistrationDoc.get();
+        
+        if (docSnapshot.exists) {
+          await userRegistrationDoc.update({
+            prizeClaimedAmount: shareAmount,
+            prizeClaimedAt: timestamp,
+            hasClaimed: true,
+            updatedAt: timestamp,
+          });
+          
+          console.log(`✅ Updated user ${userLower} registration in leaderboard ${leaderboardIdStr} with claimed prize: ${shareAmount}`);
+        } else {
+          console.error(`❌ User registration ${userDocId} not found for prize claim`);
+        }
+      } catch (error) {
+        console.error(`❌ Error updating prize claim for user ${userDocId}:`, error);
+      }
+
+      // Update leaderboard with prize claim activity
+      const amoyLeaderboardsRef = db.collection("amoyLeaderboardsv2.3");
+      const leaderboardDoc = amoyLeaderboardsRef.doc(leaderboardIdStr);
+      
+      try {
+        await db.runTransaction(async (transaction) => {
+          const leaderboardSnapshot = await transaction.get(leaderboardDoc);
+          
+          if (!leaderboardSnapshot.exists) {
+            console.error(`❌ Leaderboard ${leaderboardIdStr} not found for prize claim update`);
+            return;
+          }
+          
+          const leaderboardData = leaderboardSnapshot.data();
+          const currentTotalClaimed = BigInt(leaderboardData?.totalPrizeClaimed || '0');
+          const newTotalClaimed = currentTotalClaimed + BigInt(shareAmount);
+          const currentClaimCount = leaderboardData?.prizeClaimCount || 0;
+          
+          const updateData: any = {
+            totalPrizeClaimed: newTotalClaimed.toString(),
+            prizeClaimCount: currentClaimCount + 1,
+            lastPrizeClaim: timestamp,
+            updatedAt: timestamp,
+          };
+          
+          // If this is the first claim, mark when claiming started
+          if (currentClaimCount === 0) {
+            updateData.firstPrizeClaimedAt = timestamp;
+          }
+          
+          transaction.update(leaderboardDoc, updateData);
+          
+          console.log(`✅ Updated leaderboard ${leaderboardIdStr} - Total claimed: ${currentTotalClaimed.toString()} → ${newTotalClaimed.toString()}, Claims: ${currentClaimCount} → ${currentClaimCount + 1}`);
+        });
+      } catch (error) {
+        console.error(`❌ Error updating leaderboard ${leaderboardIdStr} prize claim data:`, error);
+      }
+
+      // Log prize claim details for monitoring
+      console.log(`🏆 PRIZE CLAIMED SUMMARY:`, {
+        leaderboardId: leaderboardIdStr,
+        claimant: userLower,
+        claimedAmount: shareAmount,
+        claimedAmountUSDC: parseInt(shareAmount) / 1000000,
+        timestamp: timestamp.toDate().toISOString()
+      });
+    }
   }
   // Add new event handlers here as they're implemented
 ];
