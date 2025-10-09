@@ -330,8 +330,8 @@ const sportsConfig = {
   NHL: {
     preseasonStart: '2024-12-31', // TBD
     preseasonEnd: '2024-12-31', // TBD
-    seasonStart: '2023-10-10',
-    seasonEnd: '2024-04-18',
+    seasonStart: '2025-10-08',
+    seasonEnd: '2026-04-16',
     postseasonStart: '2024-04-19',
     postseasonEnd: '2024-06-30',
     daysAheadPreseason: 10,
