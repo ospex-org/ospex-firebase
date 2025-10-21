@@ -278,8 +278,8 @@ const sportsConfig = {
   NBA: {
     preseasonStart: '2024-10-03', // TBD
     preseasonEnd: '2024-10-21', // TBD
-    seasonStart: '2024-12-25',
-    seasonEnd: '2025-04-21',
+    seasonStart: '2025-10-20',
+    seasonEnd: '2026-04-13',
     postseasonStart: '2025-01-01', // TBD
     postseasonEnd: '2025-01-01', // TBD
     daysAheadPreseason: 1,
