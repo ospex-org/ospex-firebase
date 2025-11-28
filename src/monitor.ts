@@ -239,6 +239,14 @@ interface CombinedEvent {
   LastUpdated: admin.firestore.Timestamp
   Created: boolean
   status: string
+  // Final score/status (derived primarily from Rundown; Sportspage used as secondary signal)
+  awayScore?: number
+  homeScore?: number
+  isFinal: boolean
+  scoredAt?: admin.firestore.Timestamp
+  eventStatus?: string
+  eventStatusDetail?: string
+  sportspageStatus?: string
 }
 
 interface TeamAlias {
@@ -514,6 +522,36 @@ const processEventData = (
       // console.log('Found matching event:', jsonoddsEvent.ID)
       const existingEvent = existingContests.find(e => e.jsonoddsID === jsonoddsEvent.ID)
       const isCreated = existingEvent ? existingEvent.Created : false
+      // Derive final state and scores, preferring Rundown
+      const rScore = rundownEvent.score as RundownScore | undefined
+      const sportStatusRaw = String((sportspageEvent as any)?.status || '').toLowerCase()
+      const eventStatusRaw = String(rScore?.event_status || '').toLowerCase()
+      const eventStatusDetailRaw = String(rScore?.event_status_detail || '').toLowerCase()
+      const displayClockRaw = String(rScore?.display_clock || '').toLowerCase()
+      const isFinalByRundown =
+        eventStatusRaw.includes('final') ||
+        eventStatusDetailRaw.includes('final') ||
+        displayClockRaw === 'final'
+      const isFinalBySportspage =
+        sportStatusRaw.includes('final') ||
+        sportStatusRaw.includes('complete') ||
+        sportStatusRaw.includes('finished')
+      const isFinal = Boolean(isFinalByRundown || isFinalBySportspage)
+      // Scores (Rundown provides numeric scores)
+      const awayScoreVal = typeof rScore?.score_away === 'number' ? rScore!.score_away : undefined
+      const homeScoreVal = typeof rScore?.score_home === 'number' ? rScore!.score_home : undefined
+      // Scored timestamp (prefer Rundown updated_at if present)
+      const scoredAtTs = (() => {
+        try {
+          const u = rScore?.updated_at
+          if (isFinal && u) {
+            const d = new Date(u)
+            if (Number.isFinite(d.getTime())) return admin.firestore.Timestamp.fromDate(d)
+          }
+        } catch {}
+        return isFinal ? admin.firestore.Timestamp.now() : undefined
+      })()
+
       return {
         jsonoddsID: jsonoddsEvent.ID,
         rundownID: rundownEvent.event_id,
@@ -539,13 +577,100 @@ const processEventData = (
         AwayROT: jsonoddsEvent.AwayROT || undefined,
         LastUpdated: admin.firestore.Timestamp.now(),
         Created: isCreated,
-        status: 'Ready'
+        // Status remains "Ready" until final to minimize downstream changes; mark Final when detected
+        status: isFinal ? 'Final' : 'Ready',
+        // Final/score fields (optional; only set when available)
+        ...(awayScoreVal != null ? { awayScore: awayScoreVal } : {}),
+        ...(homeScoreVal != null ? { homeScore: homeScoreVal } : {}),
+        isFinal: Boolean(isFinal),
+        ...(scoredAtTs ? { scoredAt: scoredAtTs } : {}),
+        ...(rScore?.event_status ? { eventStatus: rScore.event_status } : {}),
+        ...(rScore?.event_status_detail ? { eventStatusDetail: rScore.event_status_detail } : {}),
+        ...(sportspageEvent.status ? { sportspageStatus: sportspageEvent.status } : {}),
       }
     } else {
       // console.log('No match found for JsonOdds event:', jsonoddsEvent.ID)
       return undefined
     }
   }).filter((event): event is CombinedEvent => event !== undefined)
+}
+
+/**
+ * Update existing contests to mark finals even when JsonOdds drops the game.
+ * Matches by stored Rundown/Sportspage IDs and derives final + scores from those feeds.
+ */
+const updateExistingContestsFinals = async (
+  existingContests: CombinedEvent[],
+  rundownData: RundownResponse,
+  sportspageData: SportspageResponse,
+): Promise<void> => {
+  try {
+    const byRundownId = new Map<string, RundownEvent>()
+    for (const ev of rundownData.events || []) {
+      if (ev?.event_id) byRundownId.set(String(ev.event_id), ev)
+    }
+    const bySportspageId = new Map<number, SportspageResult>()
+    for (const ev of (sportspageData?.results || [])) {
+      if (typeof ev?.gameId === 'number') bySportspageId.set(ev.gameId, ev)
+    }
+    const batch = db.batch()
+    let updates = 0
+    for (const item of existingContests) {
+      if (item?.isFinal) continue
+      const r = item?.rundownID ? byRundownId.get(String(item.rundownID)) : undefined
+      const s = (item as any)?.sportspageID != null ? bySportspageId.get(Number((item as any).sportspageID)) : undefined
+      if (!r && !s) continue
+      const rScore = (r as any)?.score as RundownScore | undefined
+      const sportStatusRaw = String((s as any)?.status || '').toLowerCase()
+      const eventStatusRaw = String(rScore?.event_status || '').toLowerCase()
+      const eventStatusDetailRaw = String(rScore?.event_status_detail || '').toLowerCase()
+      const displayClockRaw = String(rScore?.display_clock || '').toLowerCase()
+      const isFinalByRundown =
+        eventStatusRaw.includes('final') ||
+        eventStatusDetailRaw.includes('final') ||
+        displayClockRaw === 'final'
+      const isFinalBySportspage =
+        sportStatusRaw.includes('final') ||
+        sportStatusRaw.includes('complete') ||
+        sportStatusRaw.includes('finished')
+      const isFinal = Boolean(isFinalByRundown || isFinalBySportspage)
+      if (!isFinal) continue
+      const awayScoreVal = typeof rScore?.score_away === 'number' ? rScore!.score_away : undefined
+      const homeScoreVal = typeof rScore?.score_home === 'number' ? rScore!.score_home : undefined
+      const scoredAtTs = (() => {
+        try {
+          const u = rScore?.updated_at
+          if (u) {
+            const d = new Date(u)
+            if (Number.isFinite(d.getTime())) return admin.firestore.Timestamp.fromDate(d)
+          }
+        } catch {}
+        return admin.firestore.Timestamp.now()
+      })()
+      const ref = db.collection('contests').doc(String(item.jsonoddsID))
+      const update: Partial<CombinedEvent> & {
+        status: string; isFinal: boolean;
+      } = {
+        status: 'Final',
+        isFinal: true,
+        ...(awayScoreVal != null ? { awayScore: awayScoreVal } : {}),
+        ...(homeScoreVal != null ? { homeScore: homeScoreVal } : {}),
+        scoredAt: scoredAtTs,
+        ...(rScore?.event_status ? { eventStatus: rScore.event_status } : {}),
+        ...(rScore?.event_status_detail ? { eventStatusDetail: rScore.event_status_detail } : {}),
+        ...(s?.status ? { sportspageStatus: s.status } : {}),
+        LastUpdated: admin.firestore.Timestamp.now(),
+      }
+      batch.set(ref, update, { merge: true })
+      updates++
+    }
+    if (updates > 0) {
+      await batch.commit()
+      console.log(`Updated ${updates} existing contests to Final`)
+    }
+  } catch (error) {
+    console.error('Error updating existing finals:', error)
+  }
 }
 
 const fetchRundownData = async (sportId: number, dates: string[]): Promise<RundownResponse | undefined> => {
@@ -633,16 +758,31 @@ const archiveOldData = async () => {
     const archiveColRef = db.collection('contests_archive')
 
     const batch = db.batch()
+    const nowMs = Date.now()
+    const hours = Number(process.env.ARCHIVE_AFTER_HOURS || '48')
+    const ttlMs = Math.max(1, hours) * 3600 * 1000
 
-    // Move each document to the archive
+    // Move only truly finished contests (Final and older than threshold)
     contestsSnapshot.forEach(docSnapshot => {
+      const data = docSnapshot.data() as any
+      const isFinal = Boolean(data?.isFinal || (String(data?.status || '').toLowerCase() === 'final'))
+      if (!isFinal) return
+      const when =
+        (data?.scoredAt && typeof data.scoredAt?.toDate === 'function'
+          ? (data.scoredAt as admin.firestore.Timestamp).toDate().getTime()
+          : undefined) ??
+        (data?.MatchTime && typeof data.MatchTime?.toDate === 'function'
+          ? (data.MatchTime as admin.firestore.Timestamp).toDate().getTime()
+          : undefined)
+      const ageMs = when ? (nowMs - when) : Number.POSITIVE_INFINITY
+      if (ageMs < ttlMs) return
       const archiveDocRef = archiveColRef.doc(docSnapshot.id)
-      const archiveData = { ...docSnapshot.data(), movedDate: admin.firestore.Timestamp.now() }
+      const archiveData = { ...data, movedDate: admin.firestore.Timestamp.now() }
       batch.set(archiveDocRef, archiveData)
       batch.delete(contestsColRef.doc(docSnapshot.id))
     })
     await batch.commit()
-    console.log('Old data archived successfully')
+    console.log('Archiving pass complete')
   } catch (error) {
     console.error('Error archiving old data:', error)
   }
@@ -654,7 +794,7 @@ const saveDataToFirestore = async (data: CombinedEvent[]): Promise<void> => {
     const colRef = db.collection('contests')
     data.forEach(item => {
       const docRef = colRef.doc(item.jsonoddsID)
-      batch.set(docRef, item)
+      batch.set(docRef, item, { merge: true })
     })
     await batch.commit()
     console.log('Data successfully saved to Firestore')
@@ -672,6 +812,8 @@ const monitor = async () => {
     console.log('JsonOdds data count:', jsonoddsData.length)
 
     let allCombinedData: CombinedEvent[] = []
+    const allRundownEvents: RundownEvent[] = []
+    const allSportspageResults: SportspageResult[] = []
     const existingContests = await fetchExistingContestsFromFirestore()
     console.log('Existing contests:', existingContests.length)
 
@@ -697,6 +839,8 @@ const monitor = async () => {
           const validCombinedData = combinedData.filter((event): event is CombinedEvent => event !== undefined)
           console.log('Number of matched events for', sport, ':', (validCombinedData).length)
           allCombinedData = allCombinedData.concat(validCombinedData)
+          allRundownEvents.push(...(rundownData.events || []))
+          allSportspageResults.push(...(sportspageData.results || []))
         }
       }
     }
@@ -704,8 +848,16 @@ const monitor = async () => {
     console.log('Total number of matched events across all sports:', allCombinedData.length)
     // console.log(allCombinedData)
 
-    await archiveOldData()
+    // First, update existing docs to Final using Rundown/Sportspage signals (covers games dropped by JsonOdds)
+    await updateExistingContestsFinals(
+      existingContests,
+      { meta: { delta_last_id: '' }, events: allRundownEvents },
+      { status: 200, time: new Date().toISOString(), games: allSportspageResults.length, skip: 0, results: allSportspageResults }
+    )
+    // Upsert latest feed data (merging fields)
     await saveDataToFirestore(allCombinedData)
+    // Archive only truly finished and aged-out contests
+    await archiveOldData()
 
   } catch (error) {
     console.error('Error in matching and storing data:', error)
