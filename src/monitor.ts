@@ -267,6 +267,7 @@ const teamNameAliases = new Map<string, TeamAlias[]>([
   ["Miami Florida", [{ league: 2 /* NCB */, aliases: ["Miami (FL)", "Miami Florida"] }]],
   ["Miami Ohio", [{ league: 2 /* NCB */, aliases: ["Miami (OH)", "Miami Ohio"] }]],
   ["Connecticut", [{ league: 2 /* NCB */, aliases: ["UConn", "Connecticut"] }]],
+  ["North Carolina State", [{ league: 2 /* NCB */, aliases: ["NC State", "North Carolina State"] }]],
 ])
 
 const sportsConfig = {
