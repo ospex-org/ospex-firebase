@@ -315,8 +315,8 @@ const sportsConfig = {
     preseasonEnd: '2024-12-31', // TBD
     seasonStart: '2025-09-01',
     seasonEnd: '2025-12-13',
-    postseasonStart: '2024-12-31', // TBD
-    postseasonEnd: '2024-12-31', // TBD
+    postseasonStart: '2025-12-14',
+    postseasonEnd: '2026-01-19',
     daysAheadPreseason: 1,
     daysAheadRegular: 3,
     daysAheadPostseason: 3,
