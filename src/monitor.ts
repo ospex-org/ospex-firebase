@@ -706,16 +706,42 @@ const fetchSportspageData = async (league: string, dates: string[]): Promise<Spo
     let allResults: SportspageResult[] = []
     for (const date of dates) {
       // console.log(`Making Sportspage API call for date: ${date}`)
-      const response = await axios.get(`https://sportspage-feeds.p.rapidapi.com/games?date=${date}&league=${league}`, {
-        headers: {
-          'x-rapidapi-host': 'sportspage-feeds.p.rapidapi.com',
-          'x-rapidapi-key': process.env.RAPIDAPI_API_KEY
+      
+      // Pagination: Sportspage returns max 100 games per call
+      // If games === 100, there may be more - keep fetching with skip parameter
+      let skip = 0
+      let hasMoreResults = true
+      
+      while (hasMoreResults) {
+        const url = skip === 0
+          ? `https://sportspage-feeds.p.rapidapi.com/games?date=${date}&league=${league}`
+          : `https://sportspage-feeds.p.rapidapi.com/games?date=${date}&league=${league}&skip=${skip}`
+        
+        // console.log(`Making Sportspage API call: ${url}`)
+        const response = await axios.get(url, {
+          headers: {
+            'x-rapidapi-host': 'sportspage-feeds.p.rapidapi.com',
+            'x-rapidapi-key': process.env.RAPIDAPI_API_KEY
+          }
+        })
+        
+        const results = response.data.results || []
+        const gamesReturned = response.data.games || results.length
+        
+        // console.log(`Sportspage API response for date ${date} (skip=${skip}): ${gamesReturned} games`)
+        allResults = allResults.concat(results)
+        
+        // If we got exactly 100 games, there might be more - fetch next page
+        if (gamesReturned === 100) {
+          skip += 100
+          console.log(`Sportspage returned 100 games for ${league} on ${date}, fetching more with skip=${skip}`)
+        } else {
+          // Less than 100 means we've got all results for this date
+          hasMoreResults = false
         }
-      })
-      // console.log(`Sportspage API response for date ${date}:`, response.data)
-      allResults = allResults.concat(response.data.results)
+      }
     }
-    // console.log(`Total Sportspage results fetched: ${allResults.length}`)
+    console.log(`Total Sportspage results fetched for ${league}: ${allResults.length}`)
     return {
       status: 200,
       time: new Date().toISOString(),
