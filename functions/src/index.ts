@@ -14,15 +14,18 @@ const db = admin.firestore();
 /**
  * Extract transaction hash and log index from webhook log payload.
  * Handles both Alchemy and Thirdweb webhook formats.
+ * @param {object} log - The webhook log payload
+ * @return {string|null} Event ID in format "txHash_logIndex" or null if extraction fails
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function extractEventId(log: any): string | null {
   // Try Alchemy format: log.transaction.hash and log.index
-  const alchemyTxHash = log?.transaction?.hash;
-  const alchemyLogIndex = log?.index;
+  const alchemyTxHash = log?.transaction?.hash as string | undefined;
+  const alchemyLogIndex = log?.index as number | undefined;
 
   // Try Thirdweb/standard format: log.transactionHash and log.logIndex
-  const thirdwebTxHash = log?.transactionHash;
-  const thirdwebLogIndex = log?.logIndex;
+  const thirdwebTxHash = log?.transactionHash as string | undefined;
+  const thirdwebLogIndex = log?.logIndex as number | undefined;
 
   const txHash = alchemyTxHash || thirdwebTxHash;
   const logIndex = alchemyLogIndex ?? thirdwebLogIndex;
@@ -38,8 +41,9 @@ function extractEventId(log: any): string | null {
 /**
  * Check if an event has already been processed. If not, mark it as processed.
  * Uses a Firestore transaction to prevent race conditions.
- *
- * @returns true if event was already processed (should skip), false if new event (should process)
+ * @param {string} eventId - Unique event identifier (txHash_logIndex)
+ * @param {string} eventType - Type of event being processed
+ * @return {Promise<boolean>} true if already processed (skip), false if new (process)
  */
 async function checkAndMarkEventProcessed(eventId: string, eventType: string): Promise<boolean> {
   const processedEventsRef = db.collection('processedEvents').doc(eventId);
