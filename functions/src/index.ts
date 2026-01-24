@@ -479,23 +479,25 @@ const EVENT_HANDLERS: EventHandler[] = [
       
       // Handle counterparty tracking with proper aggregation
       const currentCounterparties = makerData.counterparties || [];
-      const currentCounterpartyAmounts = makerData.counterpartyAmounts || [];
+      const currentCounterpartyAmounts: number[] = (makerData.counterpartyAmounts || []).map(
+        (amt: string | number) => typeof amt === 'number' ? amt : parseInt(String(amt) || '0')
+      );
       const takerLower = taker.toLowerCase();
-      
+
       // Find if this taker already exists in counterparties
       const existingIndex = currentCounterparties.indexOf(takerLower);
       let newCounterparties = [...currentCounterparties];
       let newCounterpartyAmounts = [...currentCounterpartyAmounts];
-      
+
       if (existingIndex >= 0) {
         // Taker already exists - add to their existing amount
-        const existingAmount = parseInt(currentCounterpartyAmounts[existingIndex] || "0");
+        const existingAmount = currentCounterpartyAmounts[existingIndex] || 0;
         const newAmount = existingAmount + parseInt(amount.toString());
-        newCounterpartyAmounts[existingIndex] = newAmount.toString();
+        newCounterpartyAmounts[existingIndex] = newAmount; // Store as number
       } else {
         // New taker - add to end of arrays
         newCounterparties.push(takerLower);
-        newCounterpartyAmounts.push(amount.toString());
+        newCounterpartyAmounts.push(parseInt(amount.toString())); // Store as number
       }
       
       await makerDoc.update({
@@ -516,7 +518,7 @@ const EVENT_HANDLERS: EventHandler[] = [
         takerAmountAdded: amount.toString(),
         newCounterparties,
         newCounterpartyAmounts,
-        totalCounterpartyAmountsSum: newCounterpartyAmounts.reduce((sum, amt) => sum + parseInt(amt), 0)
+        totalCounterpartyAmountsSum: newCounterpartyAmounts.reduce((sum, amt) => sum + amt, 0)
       });
 
       // Create taker position with opposite position type
@@ -539,7 +541,9 @@ const EVENT_HANDLERS: EventHandler[] = [
 
         // Handle counterparty tracking with proper aggregation for taker
         const currentTakerCounterparties = takerData.counterparties || [];
-        const currentTakerCounterpartyAmounts = takerData.counterpartyAmounts || [];
+        const currentTakerCounterpartyAmounts: number[] = (takerData.counterpartyAmounts || []).map(
+          (amt: string | number) => typeof amt === 'number' ? amt : parseInt(String(amt) || '0')
+        );
         const makerLower = maker.toLowerCase();
 
         // Find if this maker already exists in taker's counterparties
@@ -549,13 +553,13 @@ const EVENT_HANDLERS: EventHandler[] = [
 
         if (existingMakerIndex >= 0) {
           // Maker already exists - add to their existing amount (use maker amount consumed - what the maker put up)
-          const existingMakerAmount = parseInt(currentTakerCounterpartyAmounts[existingMakerIndex] || "0");
+          const existingMakerAmount = currentTakerCounterpartyAmounts[existingMakerIndex] || 0;
           const newMakerAmount = existingMakerAmount + makerAmountConsumed;
-          newTakerCounterpartyAmounts[existingMakerIndex] = newMakerAmount.toString();
+          newTakerCounterpartyAmounts[existingMakerIndex] = newMakerAmount; // Store as number
         } else {
           // New maker - add to end of arrays (use maker amount consumed - what the maker put up)
           newTakerCounterparties.push(makerLower);
-          newTakerCounterpartyAmounts.push(makerAmountConsumed.toString());
+          newTakerCounterpartyAmounts.push(makerAmountConsumed); // Store as number
         }
 
         await takerDoc.update({
@@ -578,7 +582,7 @@ const EVENT_HANDLERS: EventHandler[] = [
           lowerOdds: lowerOdds.toString(),
           newTakerCounterparties,
           newTakerCounterpartyAmounts,
-          totalTakerCounterpartySum: newTakerCounterpartyAmounts.reduce((sum, amt) => sum + parseInt(amt), 0)
+          totalTakerCounterpartySum: newTakerCounterpartyAmounts.reduce((sum, amt) => sum + amt, 0)
         });
       } else {
         // Create new taker position - store amounts as numbers for queryability
@@ -596,7 +600,7 @@ const EVENT_HANDLERS: EventHandler[] = [
           upperOdds: upperOdds.toString(),
           lowerOdds: lowerOdds.toString(),
           counterparties: [maker.toLowerCase()],
-          counterpartyAmounts: [makerAmountConsumed.toString()], // What the maker put up (consumed)
+          counterpartyAmounts: [makerAmountConsumed], // Store as number for consistency
           createdAt: Timestamp.now(),
         });
 
@@ -609,7 +613,7 @@ const EVENT_HANDLERS: EventHandler[] = [
           upperOdds: upperOdds.toString(),
           lowerOdds: lowerOdds.toString(),
           counterparties: [maker.toLowerCase()],
-          counterpartyAmounts: [makerAmountConsumed.toString()]
+          counterpartyAmounts: [makerAmountConsumed]
         });
       }
     }
