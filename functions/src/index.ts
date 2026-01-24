@@ -7,6 +7,75 @@ const { Timestamp, FieldValue } = admin.firestore;
 
 const db = admin.firestore();
 
+// ============================================================================
+// IDEMPOTENCY: Prevent duplicate event processing from webhook retries
+// ============================================================================
+
+/**
+ * Extract transaction hash and log index from webhook log payload.
+ * Handles both Alchemy and Thirdweb webhook formats.
+ */
+function extractEventId(log: any): string | null {
+  // Try Alchemy format: log.transaction.hash and log.index
+  const alchemyTxHash = log?.transaction?.hash;
+  const alchemyLogIndex = log?.index;
+
+  // Try Thirdweb/standard format: log.transactionHash and log.logIndex
+  const thirdwebTxHash = log?.transactionHash;
+  const thirdwebLogIndex = log?.logIndex;
+
+  const txHash = alchemyTxHash || thirdwebTxHash;
+  const logIndex = alchemyLogIndex ?? thirdwebLogIndex;
+
+  if (!txHash || logIndex === undefined || logIndex === null) {
+    console.log(`[Idempotency] Could not extract eventId - txHash: ${txHash}, logIndex: ${logIndex}`);
+    return null;
+  }
+
+  return `${txHash}_${logIndex}`;
+}
+
+/**
+ * Check if an event has already been processed. If not, mark it as processed.
+ * Uses a Firestore transaction to prevent race conditions.
+ *
+ * @returns true if event was already processed (should skip), false if new event (should process)
+ */
+async function checkAndMarkEventProcessed(eventId: string, eventType: string): Promise<boolean> {
+  const processedEventsRef = db.collection('processedEvents').doc(eventId);
+
+  try {
+    const result = await db.runTransaction(async (transaction) => {
+      const doc = await transaction.get(processedEventsRef);
+
+      if (doc.exists) {
+        // Already processed - return true to skip
+        return true;
+      }
+
+      // Not processed yet - mark it as processed
+      // TTL: 7 days from now for cleanup
+      const expiresAt = Timestamp.fromDate(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+
+      transaction.set(processedEventsRef, {
+        eventType,
+        processedAt: Timestamp.now(),
+        expiresAt,
+      });
+
+      return false;
+    });
+
+    return result;
+  } catch (error) {
+    // If transaction fails (e.g., concurrent write), treat as duplicate to be safe
+    console.error(`[Idempotency] Transaction failed for ${eventId}:`, error);
+    return true;
+  }
+}
+
+// ============================================================================
+
 // Event Handler Registry - Add new events here as they're implemented
 interface EventHandler {
   eventName: string;
@@ -36,7 +105,8 @@ const EVENT_HANDLERS: EventHandler[] = [
         if (!contestsSnapshot.empty) {
           for (const doc of contestsSnapshot.docs) {
             const data = doc.data();
-            const { Created, ...rest } = data;
+            // Exclude Created flag and score fields - scores should only come from CONTEST_SCORES_SET event
+            const { Created, awayScore, homeScore, scoredAt, ...rest } = data;
             await amoyContestsRef.doc(contestId.toString()).set({
               ...rest,
               contestId: contestId.toString(),
@@ -45,6 +115,12 @@ const EVENT_HANDLERS: EventHandler[] = [
               status: 'Unverified',
             });
             console.log(`Copied contest ${contestId.toString()} to amoyContestsv2.3 from contests with status 'Unverified'.`);
+            
+            // Update the original contests collection document to set Created: true
+            await doc.ref.update({
+              Created: true,
+            });
+            console.log(`Set Created: true in contests collection for jsonoddsID ${jsonoddsId.toString()}.`);
           }
         } else {
           console.error(`ERROR: Contest with jsonoddsID ${jsonoddsId.toString()} not found in contests collection.`);
@@ -291,8 +367,8 @@ const EVENT_HANDLERS: EventHandler[] = [
         console.log(`Position ${docId} already exists in amoyPositionsv2.3, updating with new data.`);
         // Update existing position (in case of adjustments)
         await positionDoc.update({
-          unmatchedAmount: amount.toString(), // Initially all unmatched
-          matchedAmount: "0",
+          unmatchedAmount: parseInt(amount.toString()), // Store as number for queryability
+          matchedAmount: 0,
           unmatchedExpiry: unmatchedExpiry.toString(),
           upperOdds: upperOdds.toString(),
           lowerOdds: lowerOdds.toString(),
@@ -302,15 +378,15 @@ const EVENT_HANDLERS: EventHandler[] = [
       } else {
         // Create new position document
         const positionTypeString = positionType.toString() === "0" ? "Upper" : "Lower";
-        
+
         await positionDoc.set({
           speculationId: speculationId.toString(),
           user: user.toLowerCase(),
           oddsPairId: oddsPairId.toString(),
           positionType: positionType.toString(),
           positionTypeString: positionTypeString,
-          matchedAmount: "0",
-          unmatchedAmount: amount.toString(),
+          matchedAmount: 0, // Store as number for queryability
+          unmatchedAmount: parseInt(amount.toString()), // Store as number for queryability
           unmatchedExpiry: unmatchedExpiry.toString(),
           upperOdds: upperOdds.toString(),
           lowerOdds: lowerOdds.toString(),
@@ -395,9 +471,11 @@ const EVENT_HANDLERS: EventHandler[] = [
         contractFormula: `${amount.toString()} * (${relevantOdds} - ${ODDS_PRECISION}) / ${ODDS_PRECISION} = ${makerAmountConsumed}`
       });
       
-      // Update maker's position
-      const newMakerMatchedAmount = (parseInt(makerData.matchedAmount) + parseInt(makerAmountConsumed.toString())).toString();
-      const newMakerUnmatchedAmount = (parseInt(makerData.unmatchedAmount) - parseInt(makerAmountConsumed.toString())).toString();
+      // Update maker's position - store as numbers for queryability
+      const currentMakerMatched = typeof makerData.matchedAmount === 'number' ? makerData.matchedAmount : parseInt(makerData.matchedAmount || '0');
+      const currentMakerUnmatched = typeof makerData.unmatchedAmount === 'number' ? makerData.unmatchedAmount : parseInt(makerData.unmatchedAmount || '0');
+      const newMakerMatchedAmount = currentMakerMatched + makerAmountConsumed;
+      const newMakerUnmatchedAmount = currentMakerUnmatched - makerAmountConsumed;
       
       // Handle counterparty tracking with proper aggregation
       const currentCounterparties = makerData.counterparties || [];
@@ -456,31 +534,32 @@ const EVENT_HANDLERS: EventHandler[] = [
           console.error(`ERROR: Taker position data is null for ${takerDocId}.`);
           return;
         }
-        const newTakerMatchedAmount = (parseInt(takerData.matchedAmount) + parseInt(amount.toString())).toString();
-        
+        const currentTakerMatched = typeof takerData.matchedAmount === 'number' ? takerData.matchedAmount : parseInt(takerData.matchedAmount || '0');
+        const newTakerMatchedAmount = currentTakerMatched + parseInt(amount.toString());
+
         // Handle counterparty tracking with proper aggregation for taker
         const currentTakerCounterparties = takerData.counterparties || [];
         const currentTakerCounterpartyAmounts = takerData.counterpartyAmounts || [];
         const makerLower = maker.toLowerCase();
-        
+
         // Find if this maker already exists in taker's counterparties
         const existingMakerIndex = currentTakerCounterparties.indexOf(makerLower);
         let newTakerCounterparties = [...currentTakerCounterparties];
         let newTakerCounterpartyAmounts = [...currentTakerCounterpartyAmounts];
-        
+
         if (existingMakerIndex >= 0) {
           // Maker already exists - add to their existing amount (use maker amount consumed - what the maker put up)
           const existingMakerAmount = parseInt(currentTakerCounterpartyAmounts[existingMakerIndex] || "0");
-          const newMakerAmount = existingMakerAmount + parseInt(makerAmountConsumed.toString());
+          const newMakerAmount = existingMakerAmount + makerAmountConsumed;
           newTakerCounterpartyAmounts[existingMakerIndex] = newMakerAmount.toString();
         } else {
           // New maker - add to end of arrays (use maker amount consumed - what the maker put up)
           newTakerCounterparties.push(makerLower);
           newTakerCounterpartyAmounts.push(makerAmountConsumed.toString());
         }
-        
+
         await takerDoc.update({
-          matchedAmount: newTakerMatchedAmount,
+          matchedAmount: newTakerMatchedAmount, // Store as number
           counterparties: newTakerCounterparties,
           counterpartyAmounts: newTakerCounterpartyAmounts,
           // Copy odds from maker position (these are the same for both sides of the match)
@@ -488,7 +567,7 @@ const EVENT_HANDLERS: EventHandler[] = [
           lowerOdds: lowerOdds.toString(),
           updatedAt: Timestamp.now(),
         });
-        
+
         console.log(`🔍 TAKER POSITION UPDATE (existing) - ${takerDocId}:`, {
           previousMatched: takerData.matchedAmount,
           newTakerMatchedAmount,
@@ -502,15 +581,15 @@ const EVENT_HANDLERS: EventHandler[] = [
           totalTakerCounterpartySum: newTakerCounterpartyAmounts.reduce((sum, amt) => sum + parseInt(amt), 0)
         });
       } else {
-        // Create new taker position
+        // Create new taker position - store amounts as numbers for queryability
         await takerDoc.set({
           speculationId: speculationId.toString(),
           user: taker.toLowerCase(),
           oddsPairId: oddsPairId.toString(),
           positionType: takerPositionType,
           positionTypeString: takerPositionTypeString,
-          matchedAmount: amount.toString(),
-          unmatchedAmount: "0",
+          matchedAmount: parseInt(amount.toString()), // Store as number
+          unmatchedAmount: 0, // Store as number
           unmatchedExpiry: "0",
           claimed: false,
           // Copy odds from maker position (these are the same for both sides of the match)
@@ -520,9 +599,9 @@ const EVENT_HANDLERS: EventHandler[] = [
           counterpartyAmounts: [makerAmountConsumed.toString()], // What the maker put up (consumed)
           createdAt: Timestamp.now(),
         });
-        
+
         console.log(`🔍 TAKER POSITION CREATE (new) - ${takerDocId}:`, {
-          takerMatchedAmount: amount.toString(),
+          takerMatchedAmount: parseInt(amount.toString()),
           makerAmountConsumed,
           positionType: takerPositionType,
           positionTypeString: takerPositionTypeString,
@@ -566,24 +645,24 @@ const EVENT_HANDLERS: EventHandler[] = [
           return;
         }
         
-        // Calculate new unmatched amount based on adjustment
-        const currentUnmatched = parseInt(currentData.unmatchedAmount || "0");
+        // Calculate new unmatched amount based on adjustment - handle both string and number formats
+        const currentUnmatched = typeof currentData.unmatchedAmount === 'number' ? currentData.unmatchedAmount : parseInt(currentData.unmatchedAmount || "0");
         const adjustmentAmount = parseInt(amount.toString());
-        const newUnmatchedAmount = (currentUnmatched + adjustmentAmount).toString();
-        
+        const newUnmatchedAmount = currentUnmatched + adjustmentAmount; // Store as number
+
         // Prepare update object
         const updateData: any = {
-          unmatchedAmount: newUnmatchedAmount,
+          unmatchedAmount: newUnmatchedAmount, // Store as number for queryability
           updatedAt: Timestamp.now(),
         };
-        
+
         // Update expiry if provided (non-zero value)
         if (newUnmatchedExpiry.toString() !== "0") {
           updateData.unmatchedExpiry = newUnmatchedExpiry.toString();
         }
-        
+
         await positionDoc.update(updateData);
-        
+
         console.log(`Updated position ${docId} - adjustment: ${adjustmentAmount}, new unmatched: ${newUnmatchedAmount}${newUnmatchedExpiry.toString() !== "0" ? `, new expiry: ${newUnmatchedExpiry.toString()}` : ""}`);
       } else {
         console.log(`Position ${docId} not found for adjustment, skipping.`);
@@ -1340,6 +1419,19 @@ export const insightWebhook = functions.https.onRequest(async (req, res) => {
 
       // Process event using registered handler
       if (eventHandler) {
+        // Idempotency check: prevent duplicate processing from webhook retries
+        const eventId = extractEventId(log);
+        if (eventId) {
+          const alreadyProcessed = await checkAndMarkEventProcessed(eventId, eventType);
+          if (alreadyProcessed) {
+            console.log(`[Idempotency] Skipping duplicate event ${eventType} (${eventId})`);
+            res.status(200).send("ok - duplicate");
+            return;
+          }
+        } else {
+          console.log(`[Idempotency] Warning: Could not extract eventId, processing anyway`);
+        }
+
         try {
           // Decode the event data
           const [inner] = AbiCoder.defaultAbiCoder().decode(["bytes"], eventData);
@@ -1355,7 +1447,7 @@ export const insightWebhook = functions.https.onRequest(async (req, res) => {
       } else {
         console.log(`[Event ignored] No handler registered for eventType: ${eventType} (${eventTypeKey})`);
       }
-      
+
       res.status(200).send("ok");
       return;
     } else if (req.body.event && req.body.event.data && req.body.event.data.block && req.body.event.data.block.logs) {
@@ -1393,6 +1485,18 @@ export const insightWebhook = functions.https.onRequest(async (req, res) => {
 
         // Process event using registered handler
         if (eventHandler) {
+          // Idempotency check: prevent duplicate processing from webhook retries
+          const eventId = extractEventId(log);
+          if (eventId) {
+            const alreadyProcessed = await checkAndMarkEventProcessed(eventId, eventType);
+            if (alreadyProcessed) {
+              console.log(`[Event ${i}] Skipping duplicate event ${eventType} (${eventId})`);
+              continue;
+            }
+          } else {
+            console.log(`[Event ${i}] Warning: Could not extract eventId, processing anyway`);
+          }
+
           try {
             // Decode the event data
             const [inner] = AbiCoder.defaultAbiCoder().decode(["bytes"], eventData);
@@ -1423,6 +1527,8 @@ export const insightWebhook = functions.https.onRequest(async (req, res) => {
   }
 });
 
+// removed scheduled firestore cleanup, this is now handled by the monitor script
+/*
 export const scheduledFirestoreCleanup =
   functions.pubsub.schedule("every 24 hours").onRun(async (context) => {
     const now = Timestamp.now();
@@ -1458,6 +1564,7 @@ export const scheduledFirestoreCleanup =
       console.error("Error during Firestore cleanup:", error);
     }
   });
+*/
 
 // Generic function to sync missed events for any event type
 export const syncMissedEvents = functions.https.onCall(async (data, context) => {
