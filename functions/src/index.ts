@@ -8,6 +8,24 @@ const { Timestamp, FieldValue } = admin.firestore;
 const db = admin.firestore();
 
 // ============================================================================
+// NETWORK CONFIGURATION: Switch between amoy and polygon
+// ============================================================================
+
+const NETWORK = functions.config().ospex?.network || 'amoy';
+
+const COLLECTIONS = {
+  contests: `${NETWORK}Contestsv2.3`,
+  speculations: `${NETWORK}Speculationsv2.3`,
+  positions: `${NETWORK}Positionsv2.3`,
+  leaderboards: `${NETWORK}Leaderboardsv2.3`,
+  leaderboardRegistrations: `${NETWORK}LeaderboardRegistrationsv2.3`,
+  leaderboardPositions: `${NETWORK}LeaderboardPositionsv2.3`,
+  // Shared collections (not network-specific)
+  processedEvents: 'processedEvents',
+  contestsReference: 'contests',
+};
+
+// ============================================================================
 // IDEMPOTENCY: Prevent duplicate event processing from webhook retries
 // ============================================================================
 
@@ -46,7 +64,7 @@ function extractEventId(log: any): string | null {
  * @return {Promise<boolean>} true if already processed (skip), false if new (process)
  */
 async function checkAndMarkEventProcessed(eventId: string, eventType: string): Promise<boolean> {
-  const processedEventsRef = db.collection('processedEvents').doc(eventId);
+  const processedEventsRef = db.collection(COLLECTIONS.processedEvents).doc(eventId);
 
   try {
     const result = await db.runTransaction(async (transaction) => {
@@ -97,37 +115,37 @@ const EVENT_HANDLERS: EventHandler[] = [
       const [contestId, rundownId, sportspageId, jsonoddsId, contestCreator, scoreContestSourceHash] = decodedData;
       console.log("CONTEST_CREATED:", { contestId: contestId.toString(), rundownId, sportspageId, jsonoddsId });
 
-      // Look up contest by jsonoddsID in amoyContestsv2.3
-      const amoyContestsRef = db.collection("amoyContestsv2.3");
-      const querySnapshot = await amoyContestsRef.where("jsonoddsID", "==", jsonoddsId.toString()).get();
+      // Look up contest by jsonoddsID in contests collection
+      const contestsCollectionRef = db.collection(COLLECTIONS.contests);
+      const querySnapshot = await contestsCollectionRef.where("jsonoddsID", "==", jsonoddsId.toString()).get();
       if (!querySnapshot.empty) {
-        console.log(`Contest with jsonoddsID ${jsonoddsId.toString()} already exists in amoyContestsv2.3, skipping.`);
+        console.log(`Contest with jsonoddsID ${jsonoddsId.toString()} already exists in ${COLLECTIONS.contests}, skipping.`);
       } else {
-        // Copy from contests collection
-        const contestsRef = db.collection("contests");
+        // Copy from contests reference collection
+        const contestsRef = db.collection(COLLECTIONS.contestsReference);
         const contestsSnapshot = await contestsRef.where("jsonoddsID", "==", jsonoddsId.toString()).get();
         if (!contestsSnapshot.empty) {
           for (const doc of contestsSnapshot.docs) {
             const data = doc.data();
             // Exclude Created flag and score fields - scores should only come from CONTEST_SCORES_SET event
             const { Created, awayScore, homeScore, scoredAt, ...rest } = data;
-            await amoyContestsRef.doc(contestId.toString()).set({
+            await contestsCollectionRef.doc(contestId.toString()).set({
               ...rest,
               contestId: contestId.toString(),
               contestCreator: contestCreator.toLowerCase(),
               scoreContestSourceHash: scoreContestSourceHash,
               status: 'Unverified',
             });
-            console.log(`Copied contest ${contestId.toString()} to amoyContestsv2.3 from contests with status 'Unverified'.`);
-            
-            // Update the original contests collection document to set Created: true
+            console.log(`Copied contest ${contestId.toString()} to ${COLLECTIONS.contests} from ${COLLECTIONS.contestsReference} with status 'Unverified'.`);
+
+            // Update the original contests reference collection document to set Created: true
             await doc.ref.update({
               Created: true,
             });
-            console.log(`Set Created: true in contests collection for jsonoddsID ${jsonoddsId.toString()}.`);
+            console.log(`Set Created: true in ${COLLECTIONS.contestsReference} collection for jsonoddsID ${jsonoddsId.toString()}.`);
           }
         } else {
-          console.error(`ERROR: Contest with jsonoddsID ${jsonoddsId.toString()} not found in contests collection.`);
+          console.error(`ERROR: Contest with jsonoddsID ${jsonoddsId.toString()} not found in ${COLLECTIONS.contestsReference} collection.`);
         }
       }
     }
@@ -140,17 +158,17 @@ const EVENT_HANDLERS: EventHandler[] = [
       const [contestId, startTime] = decodedData;
       console.log("[CONTEST_VERIFIED] contestId:", contestId.toString(), "startTime:", startTime.toString());
 
-      const amoyContestsRef = db.collection("amoyContestsv2.3");
-      const contestDoc = amoyContestsRef.doc(contestId.toString());
+      const contestsRef = db.collection(COLLECTIONS.contests);
+      const contestDoc = contestsRef.doc(contestId.toString());
       const docSnapshot = await contestDoc.get();
       if (docSnapshot.exists) {
         await contestDoc.update({
           status: 'Verified',
           startTime: startTime.toString(),
         });
-        console.log(`Updated contest ${contestId.toString()} status to 'Verified' in amoyContestsv2.3.`);
+        console.log(`Updated contest ${contestId.toString()} status to 'Verified' in ${COLLECTIONS.contests}.`);
       } else {
-        console.log(`No contest found in amoyContestsv2.3 for contestId ${contestId.toString()}, skipping verification update.`);
+        console.log(`No contest found in ${COLLECTIONS.contests} for contestId ${contestId.toString()}, skipping verification update.`);
       }
     }
   },
@@ -173,9 +191,9 @@ const EVENT_HANDLERS: EventHandler[] = [
         underOdds: underOdds.toString()
       });
 
-      // Update contest in amoyContestsv2.3 collection with on-chain odds
-      const amoyContestsRef = db.collection("amoyContestsv2.3");
-      const contestDoc = amoyContestsRef.doc(contestId.toString());
+      // Update contest in contests collection with on-chain odds
+      const contestsRef = db.collection(COLLECTIONS.contests);
+      const contestDoc = contestsRef.doc(contestId.toString());
       const docSnapshot = await contestDoc.get();
       
       if (docSnapshot.exists) {
@@ -222,7 +240,7 @@ const EVENT_HANDLERS: EventHandler[] = [
         
         console.log(`Updated contest ${contestId.toString()} with on-chain odds from oracle`);
       } else {
-        console.log(`No contest found in amoyContestsv2.3 for contestId ${contestId.toString()}, skipping market update.`);
+        console.log(`No contest found in ${COLLECTIONS.contests} for contestId ${contestId.toString()}, skipping market update.`);
       }
     }
   },
@@ -240,20 +258,20 @@ const EVENT_HANDLERS: EventHandler[] = [
         speculationCreator
       });
 
-      // Store speculation in amoySpeculationsv2.3 collection
-      const amoySpeculationsRef = db.collection("amoySpeculationsv2.3");
-      
+      // Store speculation in speculations collection
+      const speculationsRef = db.collection(COLLECTIONS.speculations);
+
       // Check if speculation ID already exists (blockchain-level duplicate)
-      const speculationDoc = amoySpeculationsRef.doc(speculationId.toString());
+      const speculationDoc = speculationsRef.doc(speculationId.toString());
       const docSnapshot = await speculationDoc.get();
-      
+
       if (docSnapshot.exists) {
-        console.log(`Speculation ${speculationId.toString()} already exists in amoySpeculationsv2.3, skipping.`);
+        console.log(`Speculation ${speculationId.toString()} already exists in ${COLLECTIONS.speculations}, skipping.`);
         return;
       }
 
       // Check for functional duplicates (same contest, scorer, and number)
-      const duplicateQuery = await amoySpeculationsRef
+      const duplicateQuery = await speculationsRef
         .where("contestId", "==", contestId.toString())
         .where("speculationScorer", "==", scorer.toLowerCase())
         .where("theNumber", "==", theNumber.toString())
@@ -279,7 +297,7 @@ const EVENT_HANDLERS: EventHandler[] = [
         createdAt: Timestamp.now(),
         // Note: startTimestamp is now stored on the contest, not the speculation
       });
-      console.log(`Created unique speculation ${speculationId.toString()} in amoySpeculationsv2.3.`);
+      console.log(`Created unique speculation ${speculationId.toString()} in ${COLLECTIONS.speculations}.`);
     }
   },
   {
@@ -294,10 +312,10 @@ const EVENT_HANDLERS: EventHandler[] = [
         homeScore: homeScore.toString() 
       });
 
-      const amoyContestsRef = db.collection("amoyContestsv2.3");
-      const contestDoc = amoyContestsRef.doc(contestId.toString());
+      const contestsRef = db.collection(COLLECTIONS.contests);
+      const contestDoc = contestsRef.doc(contestId.toString());
       const docSnapshot = await contestDoc.get();
-      
+
       if (docSnapshot.exists) {
         await contestDoc.update({
           status: 'Scored',
@@ -307,7 +325,7 @@ const EVENT_HANDLERS: EventHandler[] = [
         });
         console.log(`Updated contest ${contestId.toString()} with scores - Away: ${awayScore.toString()}, Home: ${homeScore.toString()}, status: 'Scored'`);
       } else {
-        console.log(`No contest found in amoyContestsv2.3 for contestId ${contestId.toString()}, skipping score update.`);
+        console.log(`No contest found in ${COLLECTIONS.contests} for contestId ${contestId.toString()}, skipping score update.`);
       }
     }
   },
@@ -323,11 +341,11 @@ const EVENT_HANDLERS: EventHandler[] = [
         scorer: scorer.toLowerCase()
       });
 
-      // Update speculation in amoySpeculationsv2.3 collection
-      const amoySpeculationsRef = db.collection("amoySpeculationsv2.3");
-      const speculationDoc = amoySpeculationsRef.doc(speculationId.toString());
+      // Update speculation in speculations collection
+      const speculationsRef = db.collection(COLLECTIONS.speculations);
+      const speculationDoc = speculationsRef.doc(speculationId.toString());
       const docSnapshot = await speculationDoc.get();
-      
+
       if (docSnapshot.exists) {
         await speculationDoc.update({
           speculationStatus: 1, // 1 = Closed
@@ -336,7 +354,7 @@ const EVENT_HANDLERS: EventHandler[] = [
         });
         console.log(`Updated speculation ${speculationId.toString()} - Status: Closed, WinSide: ${winner.toString()}`);
       } else {
-        console.log(`No speculation found in amoySpeculationsv2.3 for speculationId ${speculationId.toString()}, skipping settlement update.`);
+        console.log(`No speculation found in ${COLLECTIONS.speculations} for speculationId ${speculationId.toString()}, skipping settlement update.`);
       }
     }
   },
@@ -357,18 +375,18 @@ const EVENT_HANDLERS: EventHandler[] = [
         lowerOdds: lowerOdds.toString()
       });
 
-      // Store position in amoyPositionsv2.3 collection
-      const amoyPositionsRef = db.collection("amoyPositionsv2.3");
-      
+      // Store position in positions collection
+      const positionsRef = db.collection(COLLECTIONS.positions);
+
       // Create unique document ID: speculationId_user_oddsPairId_positionType
       const docId = `${speculationId.toString()}_${user.toLowerCase()}_${oddsPairId.toString()}_${positionType.toString()}`;
-      const positionDoc = amoyPositionsRef.doc(docId);
-      
+      const positionDoc = positionsRef.doc(docId);
+
       // Check if position already exists
       const docSnapshot = await positionDoc.get();
-      
+
       if (docSnapshot.exists) {
-        console.log(`Position ${docId} already exists in amoyPositionsv2.3, updating with new data.`);
+        console.log(`Position ${docId} already exists in ${COLLECTIONS.positions}, updating with new data.`);
         // Update existing position (in case of adjustments)
         await positionDoc.update({
           unmatchedAmount: parseInt(amount.toString()), // Store as number for queryability
@@ -378,7 +396,7 @@ const EVENT_HANDLERS: EventHandler[] = [
           lowerOdds: lowerOdds.toString(),
           updatedAt: Timestamp.now(),
         });
-        console.log(`Updated position ${docId} in amoyPositionsv2.3.`);
+        console.log(`Updated position ${docId} in ${COLLECTIONS.positions}.`);
       } else {
         // Create new position document
         const positionTypeString = positionType.toString() === "0" ? "Upper" : "Lower";
@@ -397,7 +415,7 @@ const EVENT_HANDLERS: EventHandler[] = [
           claimed: false,
           createdAt: Timestamp.now(),
         });
-        console.log(`Created position ${docId} in amoyPositionsv2.3.`);
+        console.log(`Created position ${docId} in ${COLLECTIONS.positions}.`);
       }
     }
   },
@@ -416,15 +434,15 @@ const EVENT_HANDLERS: EventHandler[] = [
         amount: amount.toString()
       });
 
-      const amoyPositionsRef = db.collection("amoyPositionsv2.3");
-      
+      const positionsRef = db.collection(COLLECTIONS.positions);
+
       // Get the maker's position to calculate how much gets matched
       const makerDocId = `${speculationId.toString()}_${maker.toLowerCase()}_${oddsPairId.toString()}_${makerPositionType.toString()}`;
-      const makerDoc = amoyPositionsRef.doc(makerDocId);
+      const makerDoc = positionsRef.doc(makerDocId);
       const makerSnapshot = await makerDoc.get();
-      
+
       if (!makerSnapshot.exists) {
-        console.error(`ERROR: Maker position ${makerDocId} not found in amoyPositionsv2.3.`);
+        console.error(`ERROR: Maker position ${makerDocId} not found in ${COLLECTIONS.positions}.`);
         return;
       }
 
@@ -528,9 +546,9 @@ const EVENT_HANDLERS: EventHandler[] = [
       // Create taker position with opposite position type
       const takerPositionType = makerPositionType.toString() === "0" ? "1" : "0"; // Upper(0) -> Lower(1), Lower(1) -> Upper(0)
       const takerPositionTypeString = takerPositionType === "0" ? "Upper" : "Lower";
-      
+
       const takerDocId = `${speculationId.toString()}_${taker.toLowerCase()}_${oddsPairId.toString()}_${takerPositionType}`;
-      const takerDoc = amoyPositionsRef.doc(takerDocId);
+      const takerDoc = positionsRef.doc(takerDocId);
       const takerSnapshot = await takerDoc.get();
       
       if (takerSnapshot.exists) {
@@ -637,11 +655,11 @@ const EVENT_HANDLERS: EventHandler[] = [
         amount: amount.toString()
       });
 
-      const amoyPositionsRef = db.collection("amoyPositionsv2.3");
-      
+      const positionsRef = db.collection(COLLECTIONS.positions);
+
       // Create unique document ID: speculationId_user_oddsPairId_positionType
       const docId = `${speculationId.toString()}_${user.toLowerCase()}_${oddsPairId.toString()}_${positionType.toString()}`;
-      const positionDoc = amoyPositionsRef.doc(docId);
+      const positionDoc = positionsRef.doc(docId);
       
       // Check if position exists
       const docSnapshot = await positionDoc.get();
@@ -691,17 +709,17 @@ const EVENT_HANDLERS: EventHandler[] = [
         payout: payout.toString()
       });
 
-      // Update the position document in amoyPositionsv2.3
-      const positionsRef = db.collection("amoyPositionsv2.3");
-      
+      // Update the position document in positions collection
+      const positionsRef = db.collection(COLLECTIONS.positions);
+
       // Query to find the position document
       // Position document ID format: speculationId_user_oddsPairId_positionType
       const positionDocId = `${speculationId.toString()}_${user.toLowerCase()}_${oddsPairId.toString()}_${positionType.toString()}`;
-      
+
       try {
         const positionDoc = positionsRef.doc(positionDocId);
         const positionSnapshot = await positionDoc.get();
-        
+
         if (positionSnapshot.exists) {
           // Update the position with claimed status and payout amount
           await positionDoc.update({
@@ -712,7 +730,7 @@ const EVENT_HANDLERS: EventHandler[] = [
           });
           console.log(`Updated position ${positionDocId} with claimed: true, claimedAmount: ${payout.toString()}`);
         } else {
-          console.error(`Position document ${positionDocId} not found in amoyPositionsv2.3`);
+          console.error(`Position document ${positionDocId} not found in ${COLLECTIONS.positions}`);
         }
       } catch (error) {
         console.error(`Error updating position ${positionDocId}:`, error);
@@ -736,15 +754,15 @@ const EVENT_HANDLERS: EventHandler[] = [
         claimWindow: claimWindow.toString()
       });
 
-      // Store leaderboard in amoyLeaderboardsv2.3 collection
-      const amoyLeaderboardsRef = db.collection("amoyLeaderboardsv2.3");
-      const leaderboardDoc = amoyLeaderboardsRef.doc(leaderboardId.toString());
-      
+      // Store leaderboard in leaderboards collection
+      const leaderboardsRef = db.collection(COLLECTIONS.leaderboards);
+      const leaderboardDoc = leaderboardsRef.doc(leaderboardId.toString());
+
       // Check if leaderboard already exists
       const docSnapshot = await leaderboardDoc.get();
-      
+
       if (docSnapshot.exists) {
-        console.log(`Leaderboard ${leaderboardId.toString()} already exists in amoyLeaderboardsv2.3, skipping.`);
+        console.log(`Leaderboard ${leaderboardId.toString()} already exists in ${COLLECTIONS.leaderboards}, skipping.`);
       } else {
         // Create new leaderboard document
         await leaderboardDoc.set({
@@ -760,7 +778,7 @@ const EVENT_HANDLERS: EventHandler[] = [
           currentParticipants: 0,
           createdAt: Timestamp.now(),
         });
-        console.log(`Created leaderboard ${leaderboardId.toString()} in amoyLeaderboardsv2.3.`);
+        console.log(`Created leaderboard ${leaderboardId.toString()} in ${COLLECTIONS.leaderboards}.`);
       }
     }
   },
@@ -776,8 +794,8 @@ const EVENT_HANDLERS: EventHandler[] = [
       });
 
       // Add speculationId to the leaderboard document's speculationIds array
-      const amoyLeaderboardsRef = db.collection("amoyLeaderboardsv2.3");
-      const leaderboardDoc = amoyLeaderboardsRef.doc(leaderboardId.toString());
+      const leaderboardsRef = db.collection(COLLECTIONS.leaderboards);
+      const leaderboardDoc = leaderboardsRef.doc(leaderboardId.toString());
       
       try {
         // Use arrayUnion to add the speculationId if it doesn't already exist
@@ -813,24 +831,24 @@ const EVENT_HANDLERS: EventHandler[] = [
         declaredBankroll: declaredBankroll.toString()
       });
 
-      // Store individual registration in amoyLeaderboardRegistrationsv2.3 collection
-      const amoyRegistrationsRef = db.collection("amoyLeaderboardRegistrationsv2.3");
-      
+      // Store individual registration in leaderboard registrations collection
+      const registrationsRef = db.collection(COLLECTIONS.leaderboardRegistrations);
+
       // Create unique document ID: leaderboardId_userAddress
       const docId = `${leaderboardId.toString()}_${userAddress.toLowerCase()}`;
-      const registrationDoc = amoyRegistrationsRef.doc(docId);
-      
+      const registrationDoc = registrationsRef.doc(docId);
+
       // Check if registration already exists
       const docSnapshot = await registrationDoc.get();
-      
+
       if (docSnapshot.exists) {
-        console.log(`Registration ${docId} already exists in amoyLeaderboardRegistrationsv2.3, updating with new data.`);
+        console.log(`Registration ${docId} already exists in ${COLLECTIONS.leaderboardRegistrations}, updating with new data.`);
         // Update existing registration (in case of re-registration)
         await registrationDoc.update({
           declaredBankroll: declaredBankroll.toString(),
           updatedAt: Timestamp.now(),
         });
-        console.log(`Updated registration ${docId} in amoyLeaderboardRegistrationsv2.3.`);
+        console.log(`Updated registration ${docId} in ${COLLECTIONS.leaderboardRegistrations}.`);
       } else {
         // Create new registration document
         await registrationDoc.set({
@@ -839,11 +857,11 @@ const EVENT_HANDLERS: EventHandler[] = [
           declaredBankroll: declaredBankroll.toString(),
           registeredAt: Timestamp.now(),
         });
-        console.log(`Created registration ${docId} in amoyLeaderboardRegistrationsv2.3.`);
+        console.log(`Created registration ${docId} in ${COLLECTIONS.leaderboardRegistrations}.`);
 
         // Update leaderboard: increment participant count and add entry fee to prize pool
-        const amoyLeaderboardsRef = db.collection("amoyLeaderboardsv2.3");
-        const leaderboardDoc = amoyLeaderboardsRef.doc(leaderboardId.toString());
+        const leaderboardsRef = db.collection(COLLECTIONS.leaderboards);
+        const leaderboardDoc = leaderboardsRef.doc(leaderboardId.toString());
         
         try {
           await db.runTransaction(async (transaction) => {
@@ -900,24 +918,24 @@ const EVENT_HANDLERS: EventHandler[] = [
         value: value.toString()
       });
 
-      // Update leaderboard in amoyLeaderboardsv2.3 collection
-      const amoyLeaderboardsRef = db.collection("amoyLeaderboardsv2.3");
-      const leaderboardDoc = amoyLeaderboardsRef.doc(leaderboardId.toString());
+      // Update leaderboard in leaderboards collection
+      const leaderboardsRef = db.collection(COLLECTIONS.leaderboards);
+      const leaderboardDoc = leaderboardsRef.doc(leaderboardId.toString());
       const docSnapshot = await leaderboardDoc.get();
-      
+
       if (docSnapshot.exists) {
         // Update existing leaderboard with the rule
-        const updateData: any = {
+        const updateData: Record<string, unknown> = {
           updatedAt: Timestamp.now()
         };
-        
+
         // Set the rule using the ruleType as the field name
         updateData[ruleType] = value.toString();
-        
+
         await leaderboardDoc.update(updateData);
         console.log(`Updated leaderboard ${leaderboardId.toString()} with rule ${ruleType}: ${value.toString()}`);
       } else {
-        console.log(`No leaderboard found in amoyLeaderboardsv2.3 for leaderboardId ${leaderboardId.toString()}, skipping rule update.`);
+        console.log(`No leaderboard found in ${COLLECTIONS.leaderboards} for leaderboardId ${leaderboardId.toString()}, skipping rule update.`);
       }
     }
   },
@@ -944,11 +962,11 @@ const EVENT_HANDLERS: EventHandler[] = [
       const leaderboardIdStr = leaderboardId.toString();
 
       // 1. Create individual leaderboard position documents for efficient querying
-      const amoyLeaderboardPositionsRef = db.collection("amoyLeaderboardPositionsv2.3");
-      
+      const leaderboardPositionsRef = db.collection(COLLECTIONS.leaderboardPositions);
+
       // Document ID: leaderboardId_speculationId_user_oddsPairId_positionType
       const docId = `${leaderboardIdStr}_${speculationId.toString()}_${userLower}_${oddsPairId.toString()}_${positionType.toString()}`;
-      const leaderboardPositionDoc = amoyLeaderboardPositionsRef.doc(docId);
+      const leaderboardPositionDoc = leaderboardPositionsRef.doc(docId);
       
       // Check if already exists (handle duplicates)
       const docSnapshot = await leaderboardPositionDoc.get();
@@ -971,15 +989,15 @@ const EVENT_HANDLERS: EventHandler[] = [
           amount: amount.toString(),
           registeredAt: timestamp,
         });
-        console.log(`Created leaderboard position ${docId} in amoyLeaderboardPositionsv2.3.`);
+        console.log(`Created leaderboard position ${docId} in ${COLLECTIONS.leaderboardPositions}.`);
       }
 
       // 2. Update the main position document with leaderboard info for easy display
-      const amoyPositionsRef = db.collection("amoyPositionsv2.3");
+      const positionsRef = db.collection(COLLECTIONS.positions);
       const positionDocId = `${speculationId.toString()}_${userLower}_${oddsPairId.toString()}_${positionType.toString()}`;
-      const positionDoc = amoyPositionsRef.doc(positionDocId);
+      const positionDoc = positionsRef.doc(positionDocId);
       const positionSnapshot = await positionDoc.get();
-      
+
       if (positionSnapshot.exists) {
         const positionData = positionSnapshot.data();
         const currentLeaderboardIds = positionData?.leaderboardIds || [];
@@ -1010,12 +1028,12 @@ const EVENT_HANDLERS: EventHandler[] = [
           amounts: updatedLeaderboardAmounts
         });
       } else {
-        console.log(`Position ${positionDocId} not found in amoyPositionsv2.3, cannot update with leaderboard info.`);
+        console.log(`Position ${positionDocId} not found in ${COLLECTIONS.positions}, cannot update with leaderboard info.`);
       }
 
       // 3. Update leaderboard documents with participation stats
-      const amoyLeaderboardsRef = db.collection("amoyLeaderboardsv2.3");
-      const leaderboardDoc = amoyLeaderboardsRef.doc(leaderboardIdStr);
+      const leaderboardsRef = db.collection(COLLECTIONS.leaderboards);
+      const leaderboardDoc = leaderboardsRef.doc(leaderboardIdStr);
       
       try {
         // Increment total positions count and update last activity
@@ -1057,11 +1075,11 @@ const EVENT_HANDLERS: EventHandler[] = [
       const leaderboardIdStr = leaderboardId.toString();
 
       // 1. Update the leaderboard position document with new amount
-      const amoyLeaderboardPositionsRef = db.collection("amoyLeaderboardPositionsv2.3");
-      
+      const leaderboardPositionsRef = db.collection(COLLECTIONS.leaderboardPositions);
+
       // Document ID: leaderboardId_speculationId_user_oddsPairId_positionType
       const docId = `${leaderboardIdStr}_${speculationId.toString()}_${userLower}_${oddsPairId.toString()}_${positionType.toString()}`;
-      const leaderboardPositionDoc = amoyLeaderboardPositionsRef.doc(docId);
+      const leaderboardPositionDoc = leaderboardPositionsRef.doc(docId);
       
       // Check if position exists
       const docSnapshot = await leaderboardPositionDoc.get();
@@ -1097,11 +1115,11 @@ const EVENT_HANDLERS: EventHandler[] = [
       }
 
       // 2. Update the main position document with updated leaderboard amount
-      const amoyPositionsRef = db.collection("amoyPositionsv2.3");
+      const positionsRef = db.collection(COLLECTIONS.positions);
       const positionDocId = `${speculationId.toString()}_${userLower}_${oddsPairId.toString()}_${positionType.toString()}`;
-      const positionDoc = amoyPositionsRef.doc(positionDocId);
+      const positionDoc = positionsRef.doc(positionDocId);
       const positionSnapshot = await positionDoc.get();
-      
+
       if (positionSnapshot.exists) {
         const positionData = positionSnapshot.data();
         const currentLeaderboardIds = positionData?.leaderboardIds || [];
@@ -1125,12 +1143,12 @@ const EVENT_HANDLERS: EventHandler[] = [
           console.log(`⚠️ Leaderboard ${leaderboardIdStr} not found in position ${positionDocId} leaderboard registrations. This may be normal for increase-only operations.`);
         }
       } else {
-        console.log(`⚠️ Position ${positionDocId} not found in amoyPositionsv2.3 for leaderboard update.`);
+        console.log(`⚠️ Position ${positionDocId} not found in ${COLLECTIONS.positions} for leaderboard update.`);
       }
 
       // 3. Update leaderboard last activity
-      const amoyLeaderboardsRef = db.collection("amoyLeaderboardsv2.3");
-      const leaderboardDoc = amoyLeaderboardsRef.doc(leaderboardIdStr);
+      const leaderboardsRef = db.collection(COLLECTIONS.leaderboards);
+      const leaderboardDoc = leaderboardsRef.doc(leaderboardIdStr);
       
       try {
         await leaderboardDoc.update({
@@ -1162,9 +1180,9 @@ const EVENT_HANDLERS: EventHandler[] = [
       const timestamp = Timestamp.now();
 
       // Update user registration with submitted ROI
-      const amoyLeaderboardRegistrationsRef = db.collection("amoyLeaderboardRegistrationsv2.3");
+      const registrationsRef = db.collection(COLLECTIONS.leaderboardRegistrations);
       const docId = `${leaderboardIdStr}_${userLower}`;
-      const userRegistrationDoc = amoyLeaderboardRegistrationsRef.doc(docId);
+      const userRegistrationDoc = registrationsRef.doc(docId);
 
       try {
         const docSnapshot = await userRegistrationDoc.get();
@@ -1185,9 +1203,9 @@ const EVENT_HANDLERS: EventHandler[] = [
       }
 
       // Also update leaderboard last activity
-      const amoyLeaderboardsRef = db.collection("amoyLeaderboardsv2.3");
-      const leaderboardDoc = amoyLeaderboardsRef.doc(leaderboardIdStr);
-      
+      const leaderboardsRef = db.collection(COLLECTIONS.leaderboards);
+      const leaderboardDoc = leaderboardsRef.doc(leaderboardIdStr);
+
       try {
         await leaderboardDoc.update({
           lastROISubmission: timestamp,
@@ -1218,9 +1236,9 @@ const EVENT_HANDLERS: EventHandler[] = [
       const timestamp = Timestamp.now();
 
       // Update winner's registration
-      const amoyLeaderboardRegistrationsRef = db.collection("amoyLeaderboardRegistrationsv2.3");
+      const registrationsRef = db.collection(COLLECTIONS.leaderboardRegistrations);
       const winnerDocId = `${leaderboardIdStr}_${winnerLower}`;
-      const winnerRegistrationDoc = amoyLeaderboardRegistrationsRef.doc(winnerDocId);
+      const winnerRegistrationDoc = registrationsRef.doc(winnerDocId);
 
       try {
         const docSnapshot = await winnerRegistrationDoc.get();
@@ -1242,7 +1260,7 @@ const EVENT_HANDLERS: EventHandler[] = [
 
       // Clear previous winners (set isCurrentWinner = false for others)
       try {
-        const registrationsSnapshot = await amoyLeaderboardRegistrationsRef
+        const registrationsSnapshot = await registrationsRef
           .where("leaderboardId", "==", leaderboardIdStr)
           .where("isCurrentWinner", "==", true)
           .get();
@@ -1269,9 +1287,9 @@ const EVENT_HANDLERS: EventHandler[] = [
       }
 
       // Update leaderboard with new highest ROI and current winner
-      const amoyLeaderboardsRef = db.collection("amoyLeaderboardsv2.3");
-      const leaderboardDoc = amoyLeaderboardsRef.doc(leaderboardIdStr);
-      
+      const leaderboardsRef = db.collection(COLLECTIONS.leaderboards);
+      const leaderboardDoc = leaderboardsRef.doc(leaderboardIdStr);
+
       try {
         await leaderboardDoc.update({
           currentHighestROI: newHighestROI.toString(),
@@ -1305,9 +1323,9 @@ const EVENT_HANDLERS: EventHandler[] = [
       const shareAmount = share.toString();
 
       // Update user registration with prize claim info
-      const amoyLeaderboardRegistrationsRef = db.collection("amoyLeaderboardRegistrationsv2.3");
+      const registrationsRef = db.collection(COLLECTIONS.leaderboardRegistrations);
       const userDocId = `${leaderboardIdStr}_${userLower}`;
-      const userRegistrationDoc = amoyLeaderboardRegistrationsRef.doc(userDocId);
+      const userRegistrationDoc = registrationsRef.doc(userDocId);
 
       try {
         const docSnapshot = await userRegistrationDoc.get();
@@ -1329,9 +1347,9 @@ const EVENT_HANDLERS: EventHandler[] = [
       }
 
       // Update leaderboard with prize claim activity
-      const amoyLeaderboardsRef = db.collection("amoyLeaderboardsv2.3");
-      const leaderboardDoc = amoyLeaderboardsRef.doc(leaderboardIdStr);
-      
+      const leaderboardsRef = db.collection(COLLECTIONS.leaderboards);
+      const leaderboardDoc = leaderboardsRef.doc(leaderboardIdStr);
+
       try {
         await db.runTransaction(async (transaction) => {
           const leaderboardSnapshot = await transaction.get(leaderboardDoc);
