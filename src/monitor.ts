@@ -3,6 +3,7 @@ import * as admin from 'firebase-admin'
 import * as dotenv from 'dotenv'
 import axios from 'axios'
 import { json } from 'express'
+import { saveOddsToSupabase } from './oddsHistory'
 
 dotenv.config()
 
@@ -883,6 +884,21 @@ const monitor = async () => {
     )
     // Upsert latest feed data (merging fields)
     await saveDataToFirestore(allCombinedData)
+
+    // Save odds history to Supabase (for Michelle's line movement analysis)
+    // Build Sportspage results map for opener lookup
+    const sportspageResultsMap = new Map<number, SportspageResult>()
+    allSportspageResults.forEach(result => {
+      sportspageResultsMap.set(result.gameId, result)
+    })
+
+    try {
+      await saveOddsToSupabase(allCombinedData, sportspageResultsMap)
+    } catch (error) {
+      console.error('[OddsHistory] Error saving odds to Supabase:', error)
+      // Non-blocking - don't fail monitor if Supabase write fails
+    }
+
     // Archive only truly finished and aged-out contests
     await archiveOldData()
 
