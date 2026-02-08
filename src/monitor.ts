@@ -329,8 +329,8 @@ const sportsConfig = {
     preseasonEnd: '2025-08-23',
     seasonStart: '2025-09-04',
     seasonEnd: '2026-01-07',
-    postseasonStart: '2026-01-09', // TBD
-    postseasonEnd: '2026-02-08', // TBD
+    postseasonStart: '2026-01-09',
+    postseasonEnd: '2026-02-10', // Extended past Super Bowl Sunday (Feb 8) to account for UTC midnight comparison
     daysAheadPreseason: 3,
     daysAheadRegular: 3,
     daysAheadPostseason: 3,
