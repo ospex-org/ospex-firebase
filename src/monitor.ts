@@ -4,6 +4,7 @@ import * as dotenv from 'dotenv'
 import axios from 'axios'
 import { json } from 'express'
 import { saveOddsToSupabase } from './oddsHistory'
+import { saveSlateToSupabase } from './slateSync'
 
 dotenv.config()
 
@@ -896,6 +897,14 @@ const monitor = async () => {
       await saveOddsToSupabase(allCombinedData, sportspageResultsMap)
     } catch (error) {
       console.error('[OddsHistory] Error saving odds to Supabase:', error)
+      // Non-blocking - don't fail monitor if Supabase write fails
+    }
+
+    // Save games to evaluation slate for agent orchestrator
+    try {
+      await saveSlateToSupabase(allCombinedData, sportspageResultsMap)
+    } catch (error) {
+      console.error('[SlateSync] Error saving slate to Supabase:', error)
       // Non-blocking - don't fail monitor if Supabase write fails
     }
 
