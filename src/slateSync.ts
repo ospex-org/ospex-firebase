@@ -6,7 +6,7 @@
  *
  * IMPORTANT: On upsert, NEVER overwrite the `evaluate` column.
  * That column is user-controlled (force/disable/triage).
- * We only update odds, game_time, synced_at, has_on_chain_contest.
+ * We only update odds, game_time, synced_at.
  */
 
 import { getSupabaseClient } from './supabase';
@@ -61,7 +61,6 @@ interface SlateRow {
   home_team: string;
   away_team: string;
   game_time: string;
-  has_on_chain_contest: boolean;
   source: string;
   synced_at: string;
   // Odds (decimal)
@@ -167,7 +166,6 @@ export async function saveSlateToSupabase(
       home_team: event.HomeTeam,
       away_team: event.AwayTeam,
       game_time: gameTimeIso,
-      has_on_chain_contest: true, // These are all from the contests collection
       source: 'monitor_sync',
       synced_at: now,
       moneyline_home: moneylineHome,
@@ -193,7 +191,7 @@ export async function saveSlateToSupabase(
   // columns (evaluate, max_eval_count, eval_interval_minutes, current_eval_count,
   // last_eval_at, source_notes). Instead:
   // - New rows: INSERT with all defaults (evaluate=null, etc.)
-  // - Existing rows: UPDATE only odds, game_time, synced_at, conference, has_on_chain_contest
+  // - Existing rows: UPDATE only odds, game_time, synced_at, conference
 
   // 1. Find which jsonodds_ids already exist
   const allIds = rows.map(r => r.jsonodds_id);
@@ -249,7 +247,6 @@ export async function saveSlateToSupabase(
         home_team: row.home_team,
         away_team: row.away_team,
         game_time: row.game_time,
-        has_on_chain_contest: row.has_on_chain_contest,
         synced_at: row.synced_at,
         moneyline_home: row.moneyline_home,
         moneyline_away: row.moneyline_away,
