@@ -409,6 +409,7 @@ const EVENT_HANDLERS: EventHandler[] = [
           positionTypeString: positionTypeString,
           matchedAmount: 0, // Store as number for queryability
           unmatchedAmount: parseInt(amount.toString()), // Store as number for queryability
+          takerAmount: 0, // Initialize to 0 - will be updated when matched
           unmatchedExpiry: unmatchedExpiry.toString(),
           upperOdds: upperOdds.toString(),
           lowerOdds: lowerOdds.toString(),
@@ -422,16 +423,17 @@ const EVENT_HANDLERS: EventHandler[] = [
   {
     eventName: "POSITION_MATCHED",
     eventHash: "0x78090ba6e58711a2fb7123d0979a7618a576580e7ee98ec925208809aa9ea711",
-    dataSchema: ["uint256", "address", "uint128", "uint8", "address", "uint256"],
+    dataSchema: ["uint256", "address", "uint128", "uint8", "address", "uint256", "uint256"],
     handler: async (decodedData, eventData) => {
-      const [speculationId, maker, oddsPairId, makerPositionType, taker, amount] = decodedData;
-      console.log("POSITION_MATCHED:", { 
-        speculationId: speculationId.toString(), 
+      const [speculationId, maker, oddsPairId, makerPositionType, taker, amount, makerAmountConsumed] = decodedData;
+      console.log("POSITION_MATCHED:", {
+        speculationId: speculationId.toString(),
         maker: maker.toLowerCase(),
         oddsPairId: oddsPairId.toString(),
         makerPositionType: makerPositionType.toString(),
         taker: taker.toLowerCase(),
-        amount: amount.toString()
+        amount: amount.toString(),
+        makerAmountConsumed: makerAmountConsumed.toString()
       });
 
       const positionsRef = db.collection(COLLECTIONS.positions);
@@ -451,53 +453,33 @@ const EVENT_HANDLERS: EventHandler[] = [
         console.error(`ERROR: Maker position data is null for ${makerDocId}.`);
         return;
       }
-      
-      // Simple approach: Use stored odds from position creation (matches smart contract exactly)
-      const ODDS_PRECISION = 10_000_000; // 1e7
-      
-      // Get stored upperOdds and lowerOdds from the maker's position
-      const upperOdds = parseInt(makerData.upperOdds);
-      const lowerOdds = parseInt(makerData.lowerOdds);
-      
-      // Calculate maker amount consumed using exact contract logic (matches Solidity)
-      // From PositionModule.sol line 792-797:
-      // uint256 makerAmountConsumed = (amount * (
-      //     makerPos.positionType == PositionType.Upper
-      //         ? oddsPair.lowerOdds - ODDS_PRECISION
-      //         : oddsPair.upperOdds - ODDS_PRECISION
-      // )) / ODDS_PRECISION;
-      const makerPositionTypeNum = parseInt(makerPositionType.toString());
-      const relevantOdds = makerPositionTypeNum === 0 ? lowerOdds : upperOdds; // Upper uses lowerOdds, Lower uses upperOdds
-      const makerAmountConsumed = Math.floor((parseInt(amount.toString()) * (relevantOdds - ODDS_PRECISION)) / ODDS_PRECISION);
-      
-      console.log(`🔍 SIMPLE CONTRACT-MATCHING CALCULATION for oddsPairId=${oddsPairId}:`, {
-        // Input values
+
+      // Use the emitted makerAmountConsumed directly from the contract event
+      // This is more accurate than calculating locally (avoids rounding discrepancies)
+      const makerAmountConsumedValue = parseInt(makerAmountConsumed.toString());
+      const takerAmountValue = parseInt(amount.toString());
+
+      console.log(`🔍 POSITION_MATCHED VALUES (from contract event):`, {
         oddsPairId: oddsPairId.toString(),
-        takerAmount: amount.toString(),
-        takerAmountUSDC: parseInt(amount.toString()) / 1000000,
-        makerPositionType: makerPositionType.toString(),
         maker: maker.toLowerCase(),
         taker: taker.toLowerCase(),
-        // Stored odds (from position creation)
-        upperOdds,
-        lowerOdds,
-        upperOddsDecimal: upperOdds / ODDS_PRECISION,
-        lowerOddsDecimal: lowerOdds / ODDS_PRECISION,
-        // Calculation
-        relevantOdds,
-        relevantOddsDecimal: relevantOdds / ODDS_PRECISION,
-        // Final results
-        makerAmountConsumed,
-        makerAmountConsumedUSDC: makerAmountConsumed / 1000000,
-        // Contract formula verification
-        contractFormula: `${amount.toString()} * (${relevantOdds} - ${ODDS_PRECISION}) / ${ODDS_PRECISION} = ${makerAmountConsumed}`
+        makerPositionType: makerPositionType.toString(),
+        // Taker's deposit (amount param) - goes into maker's takerAmount
+        takerDeposit: takerAmountValue,
+        takerDepositUSDC: takerAmountValue / 1000000,
+        // Maker's matched amount (makerAmountConsumed param) - goes into taker's takerAmount
+        makerAmountConsumed: makerAmountConsumedValue,
+        makerAmountConsumedUSDC: makerAmountConsumedValue / 1000000,
       });
       
       // Update maker's position - store as numbers for queryability
       const currentMakerMatched = typeof makerData.matchedAmount === 'number' ? makerData.matchedAmount : parseInt(makerData.matchedAmount || '0');
       const currentMakerUnmatched = typeof makerData.unmatchedAmount === 'number' ? makerData.unmatchedAmount : parseInt(makerData.unmatchedAmount || '0');
-      const newMakerMatchedAmount = currentMakerMatched + makerAmountConsumed;
-      const newMakerUnmatchedAmount = currentMakerUnmatched - makerAmountConsumed;
+      const currentMakerTakerAmount = typeof makerData.takerAmount === 'number' ? makerData.takerAmount : parseInt(makerData.takerAmount || '0');
+      const newMakerMatchedAmount = currentMakerMatched + makerAmountConsumedValue;
+      const newMakerUnmatchedAmount = currentMakerUnmatched - makerAmountConsumedValue;
+      // Maker's takerAmount = sum of all taker deposits matched against them
+      const newMakerTakerAmount = currentMakerTakerAmount + takerAmountValue;
       
       // Handle counterparty tracking with proper aggregation
       const currentCounterparties = makerData.counterparties || [];
@@ -514,17 +496,18 @@ const EVENT_HANDLERS: EventHandler[] = [
       if (existingIndex >= 0) {
         // Taker already exists - add to their existing amount
         const existingAmount = currentCounterpartyAmounts[existingIndex] || 0;
-        const newAmount = existingAmount + parseInt(amount.toString());
+        const newAmount = existingAmount + takerAmountValue;
         newCounterpartyAmounts[existingIndex] = newAmount; // Store as number
       } else {
         // New taker - add to end of arrays
         newCounterparties.push(takerLower);
-        newCounterpartyAmounts.push(parseInt(amount.toString())); // Store as number
+        newCounterpartyAmounts.push(takerAmountValue); // Store as number
       }
       
       await makerDoc.update({
         matchedAmount: newMakerMatchedAmount,
         unmatchedAmount: newMakerUnmatchedAmount,
+        takerAmount: newMakerTakerAmount,
         counterparties: newCounterparties,
         counterpartyAmounts: newCounterpartyAmounts,
         updatedAt: Timestamp.now(),
@@ -535,9 +518,11 @@ const EVENT_HANDLERS: EventHandler[] = [
         newMatchedAmount: newMakerMatchedAmount,
         previousUnmatched: makerData.unmatchedAmount,
         newUnmatchedAmount: newMakerUnmatchedAmount,
-        makerAmountConsumed,
+        previousTakerAmount: currentMakerTakerAmount,
+        newTakerAmount: newMakerTakerAmount,
+        makerAmountConsumed: makerAmountConsumedValue,
         addedTaker: taker.toLowerCase(),
-        takerAmountAdded: amount.toString(),
+        takerAmountAdded: takerAmountValue,
         newCounterparties,
         newCounterpartyAmounts,
         totalCounterpartyAmountsSum: newCounterpartyAmounts.reduce((sum, amt) => sum + amt, 0)
@@ -559,7 +544,10 @@ const EVENT_HANDLERS: EventHandler[] = [
           return;
         }
         const currentTakerMatched = typeof takerData.matchedAmount === 'number' ? takerData.matchedAmount : parseInt(takerData.matchedAmount || '0');
-        const newTakerMatchedAmount = currentTakerMatched + parseInt(amount.toString());
+        const currentTakerTakerAmount = typeof takerData.takerAmount === 'number' ? takerData.takerAmount : parseInt(takerData.takerAmount || '0');
+        const newTakerMatchedAmount = currentTakerMatched + takerAmountValue;
+        // Taker's takerAmount = sum of all maker amounts matched against them
+        const newTakerTakerAmount = currentTakerTakerAmount + makerAmountConsumedValue;
 
         // Handle counterparty tracking with proper aggregation for taker
         const currentTakerCounterparties = takerData.counterparties || [];
@@ -576,32 +564,35 @@ const EVENT_HANDLERS: EventHandler[] = [
         if (existingMakerIndex >= 0) {
           // Maker already exists - add to their existing amount (use maker amount consumed - what the maker put up)
           const existingMakerAmount = currentTakerCounterpartyAmounts[existingMakerIndex] || 0;
-          const newMakerAmount = existingMakerAmount + makerAmountConsumed;
+          const newMakerAmount = existingMakerAmount + makerAmountConsumedValue;
           newTakerCounterpartyAmounts[existingMakerIndex] = newMakerAmount; // Store as number
         } else {
           // New maker - add to end of arrays (use maker amount consumed - what the maker put up)
           newTakerCounterparties.push(makerLower);
-          newTakerCounterpartyAmounts.push(makerAmountConsumed); // Store as number
+          newTakerCounterpartyAmounts.push(makerAmountConsumedValue); // Store as number
         }
 
         await takerDoc.update({
           matchedAmount: newTakerMatchedAmount, // Store as number
+          takerAmount: newTakerTakerAmount, // Store as number
           counterparties: newTakerCounterparties,
           counterpartyAmounts: newTakerCounterpartyAmounts,
           // Copy odds from maker position (these are the same for both sides of the match)
-          upperOdds: upperOdds.toString(),
-          lowerOdds: lowerOdds.toString(),
+          upperOdds: makerData.upperOdds,
+          lowerOdds: makerData.lowerOdds,
           updatedAt: Timestamp.now(),
         });
 
         console.log(`🔍 TAKER POSITION UPDATE (existing) - ${takerDocId}:`, {
           previousMatched: takerData.matchedAmount,
           newTakerMatchedAmount,
-          takerAmountAdded: amount.toString(),
-          makerAmountConsumed,
+          previousTakerAmount: currentTakerTakerAmount,
+          newTakerAmount: newTakerTakerAmount,
+          takerDeposit: takerAmountValue,
+          makerAmountConsumed: makerAmountConsumedValue,
           // Added odds from maker position
-          upperOdds: upperOdds.toString(),
-          lowerOdds: lowerOdds.toString(),
+          upperOdds: makerData.upperOdds,
+          lowerOdds: makerData.lowerOdds,
           newTakerCounterparties,
           newTakerCounterpartyAmounts,
           totalTakerCounterpartySum: newTakerCounterpartyAmounts.reduce((sum, amt) => sum + amt, 0)
@@ -614,28 +605,30 @@ const EVENT_HANDLERS: EventHandler[] = [
           oddsPairId: oddsPairId.toString(),
           positionType: takerPositionType,
           positionTypeString: takerPositionTypeString,
-          matchedAmount: parseInt(amount.toString()), // Store as number
+          matchedAmount: takerAmountValue, // Store as number
           unmatchedAmount: 0, // Store as number
+          takerAmount: makerAmountConsumedValue, // Taker's takerAmount = what the maker put up
           unmatchedExpiry: "0",
           claimed: false,
           // Copy odds from maker position (these are the same for both sides of the match)
-          upperOdds: upperOdds.toString(),
-          lowerOdds: lowerOdds.toString(),
+          upperOdds: makerData.upperOdds,
+          lowerOdds: makerData.lowerOdds,
           counterparties: [maker.toLowerCase()],
-          counterpartyAmounts: [makerAmountConsumed], // Store as number for consistency
+          counterpartyAmounts: [makerAmountConsumedValue], // Store as number for consistency
           createdAt: Timestamp.now(),
         });
 
         console.log(`🔍 TAKER POSITION CREATE (new) - ${takerDocId}:`, {
-          takerMatchedAmount: parseInt(amount.toString()),
-          makerAmountConsumed,
+          takerMatchedAmount: takerAmountValue,
+          takerAmount: makerAmountConsumedValue,
+          makerAmountConsumed: makerAmountConsumedValue,
           positionType: takerPositionType,
           positionTypeString: takerPositionTypeString,
           // Added odds from maker position
-          upperOdds: upperOdds.toString(),
-          lowerOdds: lowerOdds.toString(),
+          upperOdds: makerData.upperOdds,
+          lowerOdds: makerData.lowerOdds,
           counterparties: [maker.toLowerCase()],
-          counterpartyAmounts: [makerAmountConsumed]
+          counterpartyAmounts: [makerAmountConsumedValue]
         });
       }
     }
