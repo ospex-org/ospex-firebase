@@ -264,12 +264,86 @@ const db = admin.firestore()
 db.settings({ ignoreUndefinedProperties: true })
 
 const teamNameAliases = new Map<string, TeamAlias[]>([
-  ["Los Angeles Clippers", [{ league: 1 /* NBA */, aliases: ["LA Clippers", "Los Angeles Clippers"] }]],
-  ["Portland Trail Blazers", [{ league: 1 /* NBA */, aliases: ["Portland Trailblazers", "Portland Trail Blazers"] }]],
-  ["Miami Florida", [{ league: 2 /* NCB */, aliases: ["Miami (FL)", "Miami Florida"] }]],
-  ["Miami Ohio", [{ league: 2 /* NCB */, aliases: ["Miami (OH)", "Miami Ohio"] }]],
-  ["Connecticut", [{ league: 2 /* NCB */, aliases: ["UConn", "Connecticut"] }]],
-  ["North Carolina State", [{ league: 2 /* NCB */, aliases: ["NC State", "North Carolina State"] }]],
+  // NBA
+  ["Los Angeles Clippers", [{ league: 1, aliases: ["LA Clippers", "Los Angeles Clippers"] }]],
+  ["Portland Trail Blazers", [{ league: 1, aliases: ["Portland Trailblazers", "Portland Trail Blazers"] }]],
+  // NCAAB disambiguation
+  ["Miami Florida", [{ league: 2, aliases: ["Miami (FL)", "Miami Florida"] }]],
+  ["Miami Ohio", [{ league: 2, aliases: ["Miami (OH)", "Miami Ohio"] }]],
+  // NCAAB + NCAAF (multi-sport aliases)
+  ["Ole Miss", [
+    { league: 2, aliases: ["Ole Miss", "Mississippi"] },
+    { league: 3, aliases: ["Ole Miss", "Mississippi"] },
+  ]],
+  ["SMU", [
+    { league: 2, aliases: ["SMU", "Southern Methodist"] },
+    { league: 3, aliases: ["SMU", "Southern Methodist"] },
+  ]],
+  ["USC", [
+    { league: 2, aliases: ["USC", "Southern California"] },
+    { league: 3, aliases: ["USC", "Southern California"] },
+  ]],
+  ["LSU", [
+    { league: 2, aliases: ["LSU", "Louisiana State"] },
+    { league: 3, aliases: ["LSU", "Louisiana State"] },
+  ]],
+  ["UCF", [
+    { league: 2, aliases: ["UCF", "Central Florida"] },
+    { league: 3, aliases: ["UCF", "Central Florida"] },
+  ]],
+  ["UNLV", [
+    { league: 2, aliases: ["UNLV", "Nevada-Las Vegas"] },
+    { league: 3, aliases: ["UNLV", "Nevada-Las Vegas"] },
+  ]],
+  ["BYU", [
+    { league: 2, aliases: ["BYU", "Brigham Young"] },
+    { league: 3, aliases: ["BYU", "Brigham Young"] },
+  ]],
+  ["TCU", [
+    { league: 2, aliases: ["TCU", "Texas Christian"] },
+    { league: 3, aliases: ["TCU", "Texas Christian"] },
+  ]],
+  ["FIU", [
+    { league: 2, aliases: ["FIU", "Florida International"] },
+    { league: 3, aliases: ["FIU", "Florida International"] },
+  ]],
+  ["App State", [
+    { league: 2, aliases: ["App State", "Appalachian State"] },
+    { league: 3, aliases: ["App State", "Appalachian State"] },
+  ]],
+  ["UTSA", [
+    { league: 2, aliases: ["UTSA", "UT San Antonio"] },
+    { league: 3, aliases: ["UTSA", "UT San Antonio"] },
+  ]],
+  ["Pittsburgh", [
+    { league: 2, aliases: ["Pittsburgh", "Pitt"] },
+    { league: 3, aliases: ["Pittsburgh", "Pitt"] },
+  ]],
+  ["UConn", [
+    { league: 2, aliases: ["UConn", "Connecticut"] },
+    { league: 3, aliases: ["UConn", "Connecticut"] },
+  ]],
+  ["NC State", [
+    { league: 2, aliases: ["NC State", "North Carolina State"] },
+    { league: 3, aliases: ["NC State", "North Carolina State"] },
+  ]],
+  // NCAAB only
+  ["VCU", [{ league: 2, aliases: ["VCU", "Virginia Commonwealth"] }]],
+  ["UMass", [{ league: 2, aliases: ["UMass", "Massachusetts"] }]],
+  ["ETSU", [{ league: 2, aliases: ["ETSU", "East Tennessee State"] }]],
+  ["VMI", [{ league: 2, aliases: ["VMI", "Virginia Military"] }]],
+  ["LIU", [{ league: 2, aliases: ["LIU", "Long Island", "Long Island University"] }]],
+  ["UMBC", [{ league: 2, aliases: ["UMBC", "Maryland-Baltimore County"] }]],
+  ["SIU", [{ league: 2, aliases: ["SIU", "Southern Illinois"] }]],
+  ["UAlbany", [{ league: 2, aliases: ["UAlbany", "Albany"] }]],
+  ["UL Monroe", [{ league: 2, aliases: ["UL Monroe", "Louisiana-Monroe"] }]],
+  ["SE Louisiana", [{ league: 2, aliases: ["SE Louisiana", "Southeastern Louisiana"] }]],
+  ["Loyola Chicago", [{ league: 2, aliases: ["Loyola Chicago", "Loyola-Chicago"] }]],
+  ["UMass Lowell", [{ league: 2, aliases: ["UMass Lowell", "Massachusetts-Lowell"] }]],
+  ["Saint Mary's", [{ league: 2, aliases: ["Saint Mary's", "St. Mary's"] }]],
+  ["Saint Joseph's", [{ league: 2, aliases: ["Saint Joseph's", "St. Joseph's"] }]],
+  ["Saint Peter's", [{ league: 2, aliases: ["Saint Peter's", "St. Peter's"] }]],
+  ["Saint Bonaventure", [{ league: 2, aliases: ["Saint Bonaventure", "St. Bonaventure"] }]],
 ])
 
 const sportsConfig = {
@@ -592,7 +666,48 @@ const processEventData = (
         ...(sportspageEvent.status ? { sportspageStatus: sportspageEvent.status } : {}),
       }
     } else {
-      // console.log('No match found for JsonOdds event:', jsonoddsEvent.ID)
+      // Log potential team name mismatches: find same-hour candidates that failed on name
+      const sameHourRundown = rundownData.events.filter((event: RundownEvent) => {
+        if (!event.teams || event.teams.length < 2) return false
+        const eventDateTime = new Date(event.event_date)
+        const eventMatchDateHour = new Date(
+          eventDateTime.getUTCFullYear(),
+          eventDateTime.getUTCMonth(),
+          eventDateTime.getUTCDate(),
+          eventDateTime.getUTCHours()
+        )
+        return eventMatchDateHour.getTime() === jsonoddsMatchDateHour.getTime()
+      })
+      const sameHourSportspage = sportspageData.results.filter((event: SportspageResult) => {
+        const eventDateTime = new Date(event.schedule.date)
+        const eventMatchDateHour = new Date(
+          eventDateTime.getUTCFullYear(),
+          eventDateTime.getUTCMonth(),
+          eventDateTime.getUTCDate(),
+          eventDateTime.getUTCHours()
+        )
+        return eventMatchDateHour.getTime() === jsonoddsMatchDateHour.getTime()
+      })
+
+      if (sameHourRundown.length > 0 || sameHourSportspage.length > 0) {
+        const missingSource = !rundownEvent && !sportspageEvent ? 'both' : !rundownEvent ? 'Rundown' : 'Sportspage'
+        const rundownNames = sameHourRundown.map(e => {
+          const home = getTeamNameForSport(jsonoddsEvent.Sport, e.teams_normalized[1].name, e.teams_normalized[1].mascot)
+          const away = getTeamNameForSport(jsonoddsEvent.Sport, e.teams_normalized[0].name, e.teams_normalized[0].mascot)
+          return `${away} @ ${home}`
+        })
+        const sportspageNames = sameHourSportspage.map(e => {
+          const home = standardizeTeamName(e.teams.home.team, jsonoddsEvent.Sport)
+          const away = standardizeTeamName(e.teams.away.team, jsonoddsEvent.Sport)
+          return `${away} @ ${home}`
+        })
+        console.log(
+          `[UNMATCHED] JSONOdds ${jsonoddsEvent.ID}: ${jsonoddsAwayTeam} @ ${jsonoddsHomeTeam} ` +
+          `(${jsonoddsMatchDateTime.toISOString()}) | No match in: ${missingSource} | ` +
+          `Rundown same-hour: [${rundownNames.join(', ')}] | Sportspage same-hour: [${sportspageNames.join(', ')}]`
+        )
+      }
+
       return undefined
     }
   }).filter((event): event is CombinedEvent => event !== undefined)
