@@ -340,7 +340,7 @@ const teamNameAliases = new Map<string, TeamAlias[]>([
   ["SE Louisiana", [{ league: 2, aliases: ["SE Louisiana", "Southeastern Louisiana"] }]],
   ["Loyola Chicago", [{ league: 2, aliases: ["Loyola Chicago", "Loyola-Chicago"] }]],
   ["UMass Lowell", [{ league: 2, aliases: ["UMass Lowell", "Massachusetts-Lowell"] }]],
-  ["Saint Mary's", [{ league: 2, aliases: ["Saint Mary's", "St. Mary's"] }]],
+  ["Saint Mary's", [{ league: 2, aliases: ["Saint Mary's", "St. Mary's", "Saint Marys CA", "St. Mary's (CA)"] }]],
   ["Saint Joseph's", [{ league: 2, aliases: ["Saint Joseph's", "St. Joseph's"] }]],
   ["Saint Peter's", [{ league: 2, aliases: ["Saint Peter's", "St. Peter's"] }]],
   ["Saint Bonaventure", [{ league: 2, aliases: ["Saint Bonaventure", "St. Bonaventure"] }]],
