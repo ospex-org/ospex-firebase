@@ -500,7 +500,11 @@ const getDatesForNextNDays = (days: number): string[] => {
 }
 
 const fetchExistingContestsFromFirestore = async (): Promise<CombinedEvent[]> => {
-  const snapshot = await db.collection('contests').get()
+  // Only load non-final contests to reduce Firestore reads (~155 reads saved per tick).
+  // Final contests (isFinal: true) never change state. Both consumers only need non-final:
+  //   - processEventData: preserves Created flag via merge:true for contests not in this list
+  //   - updateExistingContestsFinals: already skips isFinal items (redundant now)
+  const snapshot = await db.collection('contests').where('isFinal', '==', false).get()
   return snapshot.docs.map(doc => doc.data() as CombinedEvent)
 }
 
@@ -598,7 +602,10 @@ const processEventData = (
     if (rundownEvent && sportspageEvent) {
       // console.log('Found matching event:', jsonoddsEvent.ID)
       const existingEvent = existingContests.find(e => e.jsonoddsID === jsonoddsEvent.ID)
-      const isCreated = existingEvent ? existingEvent.Created : false
+      // Only include Created when the event is in our non-final filtered list.
+      // For events not loaded (already final), omitting Created lets merge:true
+      // preserve the existing value. New docs get no Created field (falsy = not created).
+      const isCreated = existingEvent !== undefined ? (existingEvent.Created ?? false) : undefined
       // Derive final state and scores, preferring Rundown
       const rScore = rundownEvent.score as RundownScore | undefined
       const sportStatusRaw = String((sportspageEvent as any)?.status || '').toLowerCase()
@@ -653,7 +660,7 @@ const processEventData = (
         HomeROT: jsonoddsEvent.HomeROT || undefined,
         AwayROT: jsonoddsEvent.AwayROT || undefined,
         LastUpdated: admin.firestore.Timestamp.now(),
-        Created: isCreated,
+        ...(isCreated !== undefined ? { Created: isCreated } : {}),
         // Status remains "Ready" until final to minimize downstream changes; mark Final when detected
         status: isFinal ? 'Final' : 'Ready',
         // Final/score fields (optional; only set when available)
