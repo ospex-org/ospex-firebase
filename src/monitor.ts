@@ -268,6 +268,7 @@ const teamNameAliases = new Map<string, TeamAlias[]>([
   ["Los Angeles Clippers", [{ league: 1, aliases: ["LA Clippers", "Los Angeles Clippers"] }]],
   ["Portland Trail Blazers", [{ league: 1, aliases: ["Portland Trailblazers", "Portland Trail Blazers"] }]],
   // NCAAB disambiguation
+  ["DePaul", [{ league: 2, aliases: ["DePaul", "Depaul"] }]],
   ["Miami Florida", [{ league: 2, aliases: ["Miami (FL)", "Miami Florida"] }]],
   ["Miami Ohio", [{ league: 2, aliases: ["Miami (OH)", "Miami Ohio"] }]],
   // NCAAB + NCAAF (multi-sport aliases)
